@@ -258,6 +258,8 @@ def preprocess(df: pd.DataFrame, fs: float, fc: float, tau_motor_ms: float):
         r=sig["r"],
         qr=qb * rb,
         pr=pb * rb,
+        q_omega_r=qb * omega_r,
+        p_omega_r=pb * omega_r,
         tau_roll=tau_roll,
         tau_pitch=tau_pitch,
         s_yaw=s_yaw,
@@ -356,6 +358,74 @@ def izz_from_cross(cat: dict, mask: np.ndarray, Ixx: float, Iyy: float):
     return izz, izz_err, cands
 
 
+def ir_from_cross(cat: dict, mask: np.ndarray, Ixx: float, Iyy: float):
+    """Estimação direta de Ir pelos termos p·omega_r e q·omega_r.
+    Roll : dp = a_tau·τ_roll  + a_p·p + a_qw·(q·omega_r)
+           a_qw = -Ir/Ixx  -> Ir = -a_qw * Ixx
+    Pitch: dq = a_tau·τ_pitch + a_q·q + b_pw·(p·omega_r)
+           b_pw = Ir/Iyy  -> Ir = b_pw * Iyy
+    """
+    m = mask
+    Xr = np.column_stack([cat["tau_roll"][m], cat["p"][m], cat["q_omega_r"][m], cat["one"][m]])
+    ta, sa, _, _ = ols(cat["dp"][m], Xr)
+    
+    Xp = np.column_stack([cat["tau_pitch"][m], cat["q"][m], cat["p_omega_r"][m], cat["one"][m]])
+    tb, sb, _, _ = ols(cat["dq"][m], Xp)
+
+    a_qw, a_err = ta[2], sa[2]
+    b_pw, b_err = tb[2], sb[2]
+    
+    ir_roll = -a_qw * Ixx
+    ir_roll_err = a_err * Ixx
+    
+    ir_pitch = b_pw * Iyy
+    ir_pitch_err = b_err * Iyy
+    
+    return [
+        dict(rota="roll (q·wr)", coef=a_qw, err=a_err, ir=ir_roll, ir_err=ir_roll_err),
+        dict(rota="pitch (p·wr)", coef=b_pw, err=b_err, ir=ir_pitch, ir_err=ir_pitch_err)
+    ]
+
+
+def axis_reliability(r2_torque, I, I_err, r2_min, rel_err_max):
+    """Critério de confiabilidade de Ixx/Iyy: R² mínimo do modelo só-torque e
+    incerteza relativa (já inclui o bracket dos 2 modelos, via axis_inertia)."""
+    if r2_torque < r2_min:
+        return False, f"R²={r2_torque:.2f} < {r2_min:.2f} (pouca excitação)"
+    rel = I_err / I
+    if rel > rel_err_max:
+        return False, f"incerteza relativa {rel*100:.0f}% > {rel_err_max*100:.0f}%"
+    return True, ""
+
+
+def ir_reliability(ir_cross, rel_err_max):
+    """Critério de confiabilidade de Ir via termos cruzados de roll/pitch: as duas
+    rotas devem ser fisicamente válidas (Ir > 0 a 2σ) E concordar entre si dentro
+    do erro combinado. Retorna (ok, ir_estimado, ir_err_estimado, motivo)."""
+    valid = [c for c in ir_cross if c["ir"] - 2.0 * c["ir_err"] > 0.0]
+    if len(valid) < len(ir_cross):
+        bad = ", ".join(c["rota"] for c in ir_cross if c not in valid)
+        return False, None, None, f"rota(s) rejeitada(s) (Ir<=0 a 2σ): {bad}"
+    ir_a, ir_b = valid[0]["ir"], valid[1]["ir"]
+    err_a, err_b = valid[0]["ir_err"], valid[1]["ir_err"]
+    if abs(ir_a - ir_b) > 2.0 * (err_a + err_b):
+        return (
+            False, None, None,
+            f"rotas discordam entre si ({valid[0]['rota']}={ir_a:.2e} vs "
+            f"{valid[1]['rota']}={ir_b:.2e}) — provável falta de excitação de yaw",
+        )
+    w_a, w_b = 1.0 / err_a**2, 1.0 / err_b**2
+    ir_est = (w_a * ir_a + w_b * ir_b) / (w_a + w_b)
+    ir_est_err = (w_a + w_b) ** -0.5
+    rel = ir_est_err / ir_est
+    if rel > rel_err_max:
+        return (
+            False, ir_est, ir_est_err,
+            f"incerteza relativa {rel*100:.0f}% > {rel_err_max*100:.0f}%",
+        )
+    return True, ir_est, ir_est_err, ""
+
+
 def axis_inertia(fit_pair):
     """(I_modelo1, I_modelo2, err_combinado, R2_1, R2_2) de um eixo roll/pitch."""
     (t1, s1, r21, _), (t2, s2, r22, _) = fit_pair
@@ -385,6 +455,8 @@ def collect_logs(args) -> list[Path]:
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # console Windows (cp1252) quebra em 'Ī' etc.
     ap = argparse.ArgumentParser(description="Identificação de Ixx, Iyy, Izz, Ir e d")
     ap.add_argument("logs", nargs="*", default=None, help="arquivos de log")
     ap.add_argument(
@@ -418,6 +490,13 @@ def main():
         type=float,
         default=0.40,
         help="gate de qualidade: R² mínimo do fit de roll (só torque)",
+    )
+    ap.add_argument(
+        "--rel-err-max",
+        type=float,
+        default=0.30,
+        help="incerteza relativa (erro/valor) máxima para considerar Ixx/Iyy/Izz/Ir "
+        "confiáveis; acima disso o valor entra na seção AVISOS do relatório",
     )
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
@@ -470,6 +549,11 @@ def main():
         sys.exit("Nenhum voo passou no gate de qualidade.")
     print(f"\nVoos usados: {', '.join(n for n, _ in kept)}")
 
+    # yaw nunca comandado -> ω_r e r não têm sinal genuíno (só ruído/vazamento não-linear):
+    # causa raiz recorrente de Izz (rota cruzada) e Ir não serem identificáveis.
+    yaw_ref_std_max = max(float(df["yaw_ref"].std()) for _, df in kept)
+    yaw_excited = yaw_ref_std_max > 1.0
+
     # ── Varredura da constante de tempo do motor (dados agrupados) ──
     # Demeaning POR VOO (Frisch-Waugh): cada voo tem trim/offset de CG próprio;
     # um intercepto único compartilhado distorceria os coeficientes agrupados.
@@ -503,6 +587,14 @@ def main():
     Ixx1, Ixx2, Ixx_err, r2x1, r2x2 = axis_inertia(fits["roll"])
     Iyy1, Iyy2, Iyy_err, r2y1, r2y2 = axis_inertia(fits["pitch"])
     Ixx, Iyy = (Ixx1 + Ixx2) / 2.0, (Iyy1 + Iyy2) / 2.0
+    p_std = float(cat["p"][mask].std())
+    q_std = float(cat["q"][mask].std())
+    Ixx_ok, Ixx_reason = axis_reliability(r2x1, Ixx, Ixx_err, args.r2_min, args.rel_err_max)
+    Iyy_ok, Iyy_reason = axis_reliability(r2y1, Iyy, Iyy_err, args.r2_min, args.rel_err_max)
+    if not Ixx_ok:
+        Ixx_reason += f" [excitação medida: std(p)={p_std:.2f} rad/s, N={n_used} amostras]"
+    if not Iyy_ok:
+        Iyy_reason += f" [excitação medida: std(q)={q_std:.2f} rad/s, N={n_used} amostras]"
 
     # ── Izz: estimação direta (termos cruzados) e/ou âncora geométrica ──
     izz_x, izz_x_err, cross = izz_from_cross(cat, mask, Ixx, Iyy)
@@ -522,6 +614,13 @@ def main():
     if use_cross and np.isfinite(izz_x):
         Izz, Izz_err = izz_x, izz_x_err
         izz_src = "termos cruzados (estimado dos dados)"
+        Izz_ok = (Izz_err / Izz) <= args.rel_err_max
+        Izz_reason = (
+            ""
+            if Izz_ok
+            else f"incerteza relativa {Izz_err/Izz*100:.0f}% > {args.rel_err_max*100:.0f}% "
+            "(rota cruzada pouco informativa)"
+        )
     else:
         if args.izz_mode == "cross":
             print(
@@ -531,6 +630,20 @@ def main():
         Izz = args.izz_ratio * (Ixx + Iyy) / 2.0
         Izz_err = args.izz_ratio * (Ixx_err + Iyy_err) / 2.0 + 0.1 * Izz
         izz_src = f"âncora geométrica {args.izz_ratio}·(Ixx+Iyy)/2 (NÃO estimado)"
+        Izz_ok = False
+        if args.izz_mode == "ratio":
+            Izz_reason = "--izz-mode ratio forçado — não estimado dos dados por escolha"
+        else:
+            rejected = ", ".join(c["rota"] for c in cross if not c["valid"]) or "ambas"
+            Izz_reason = (
+                f"rota(s) cruzada(s) rejeitada(s) ({rejected}: |coef|>1, "
+                "viés de malha fechada)"
+            )
+            if not yaw_excited:
+                Izz_reason += (
+                    f"; causa provável: yaw não comandado neste(s) voo(s) "
+                    f"(std(yaw_ref)={yaw_ref_std_max:.2f}°)"
+                )
     print(f"  -> Izz adotado: {Izz*1e6:.1f}e-6 via {izz_src}")
     print(
         f"  Limite físico superior (des. triangular): Izz <= Ixx+Iyy = "
@@ -539,16 +652,34 @@ def main():
 
     ty, sy, r2yaw, _ = fits["yaw"]
     d_over_Izz = ty[0]
-    
-    # A equação da imagem tem 0 no termo de inércia do rotor para o eixo yaw.
-    # Portanto, não podemos estimar Ir por essa rota. Assumiremos o valor do firmware.
-    Ir = FW["Ir"]
-    Ir_err = 0.0
-    Ir_over_Izz = Ir / Izz
-    
+
     d = d_over_Izz * Izz
     d_err = abs(sy[0] * Izz) + abs(d_over_Izz * Izz_err)
     Izz_via_Ir_fw = np.nan
+
+    # A equação de yaw tem coeficiente 0 no termo de inércia do rotor (a rota antiga
+    # -Ir/Izz·dω_r/dt foi removida por não ter respaldo físico nessa equação). A rota
+    # alternativa usa os termos giroscópicos cruzados de roll/pitch, onde Ir de fato
+    # aparece no modelo; só é aceita se as duas rotas forem fisicamente válidas
+    # (Ir>0 a 2σ) e concordarem entre si — senão caímos no valor fixo do firmware.
+    ir_cross = ir_from_cross(cat, mask, Ixx, Iyy)
+    print("\nEstimação de Ir via Roll/Pitch (efeito giroscópico dos motores):")
+    for c in ir_cross:
+        print(f"  rota {c['rota']:12s}: coef = {c['coef']:+8.3e} ± {c['err']:.3e} "
+              f"-> Ir = {c['ir']:8.2e} ± {c['ir_err']:.2e} (ref: {FW['Ir']:.2e})")
+
+    Ir_ok, ir_est, ir_est_err, Ir_reason = ir_reliability(ir_cross, args.rel_err_max)
+    if Ir_ok:
+        Ir, Ir_err = ir_est, ir_est_err
+    else:
+        Ir, Ir_err = FW["Ir"], 0.0
+        if not yaw_excited:
+            Ir_reason += (
+                f"; causa provável: sem excitação de yaw/ω_r neste(s) voo(s) "
+                f"(std(yaw_ref)={yaw_ref_std_max:.2f}°)"
+            )
+    Ir_over_Izz = Ir / Izz
+
 
     print("\n" + "=" * 74)
     print(
@@ -561,17 +692,29 @@ def main():
     print(f"  R² yaw   : {r2yaw:.3f}")
     print("-" * 74)
     rows = [
-        ("Ixx [kg·m²]", Ixx, Ixx_err, FW["Ixx"]),
-        ("Iyy [kg·m²]", Iyy, Iyy_err, FW["Iyy"]),
-        ("Izz [kg·m²]", Izz, Izz_err, FW["Izz"]),
-        ("Ir  [kg·m²]", Ir, Ir_err, FW["Ir"]),
-        ("d [N·m·s²] ", d, d_err, FW["d"]),
+        ("Ixx [kg·m²]", Ixx, Ixx_err, FW["Ixx"], Ixx_ok, Ixx_reason),
+        ("Iyy [kg·m²]", Iyy, Iyy_err, FW["Iyy"], Iyy_ok, Iyy_reason),
+        ("Izz [kg·m²]", Izz, Izz_err, FW["Izz"], Izz_ok, Izz_reason),
+        ("Ir  [kg·m²]", Ir, Ir_err, FW["Ir"], Ir_ok, Ir_reason),
     ]
-    for name, v, e, ref in rows:
+    avisos = []
+    for name, v, e, ref, ok, reason in rows:
+        tag = " OK  " if ok else "AVISO"
         print(
-            f"  {name}  {v:>12.4e} ± {e:>9.2e}   "
+            f"  [{tag}] {name}  {v:>12.4e} ± {e:>9.2e}   "
             f"(firmware: {ref:>10.3e}  -> razão {v/ref:5.2f}x)"
         )
+        if not ok:
+            avisos.append(f"{name.strip()}: {reason}")
+    print(
+        f"  [ -- ] d [N·m·s²]   {d:>12.4e} ± {d_err:>9.2e}   "
+        f"(firmware: {FW['d']:>10.3e}  -> razão {d/FW['d']:5.2f}x)"
+    )
+    if avisos:
+        print("-" * 74)
+        print("  AVISOS — log insuficiente p/ estes valores (NÃO usar sem revisão):")
+        for a in avisos:
+            print(f"    ! {a}")
     print("-" * 74)
     print(
         f"  Bracket Ixx: [{min(Ixx1,Ixx2):.3e}, {max(Ixx1,Ixx2):.3e}]  "
@@ -586,11 +729,14 @@ def main():
     )
     print("=" * 74)
 
+    def aviso_suffix(ok):
+        return "" if ok else "  // AVISO: ver secao AVISOS acima, nao copiar sem revisao"
+
     print("\nBloco sugerido para src/main.cpp:")
-    print(f"const float Ixx   = {Ixx*1e6:.2f}e-6f;")
-    print(f"const float Iyy   = {Iyy*1e6:.2f}e-6f;")
-    print(f"const float Izz   = {Izz*1e6:.2f}e-6f;")
-    print(f"const float Ir    = {Ir:.3e}f;")
+    print(f"const float Ixx   = {Ixx*1e6:.2f}e-6f;{aviso_suffix(Ixx_ok)}")
+    print(f"const float Iyy   = {Iyy*1e6:.2f}e-6f;{aviso_suffix(Iyy_ok)}")
+    print(f"const float Izz   = {Izz*1e6:.2f}e-6f;{aviso_suffix(Izz_ok)}")
+    print(f"const float Ir    = {Ir:.3e}f;{aviso_suffix(Ir_ok)}")
     print(f"const float MOTOR_D_COEFF = {d/B_COEFF:.4f}f * MOTOR_B_COEFF;")
 
     if not args.no_plot:
