@@ -10,18 +10,18 @@ import time
 # --- Parâmetros do Sistema ---
 # Parâmetros físicos do VANT
 Ixx = 16.57e-6  # Momento de inércia em x
-Iyy = 16.57e-6  # Momento de inércia em y
+Iyy = 15.57e-6  # Momento de inércia em y
 Izz = 29.80e-6  # Momento de inércia em z
 Ir = 1.02e-7  # Momento de inércia do rotor
 Omega_r = 0.0  # Velocidade angular do rotor
 
 u1_hover = 0.0469 * 9.80665  # m * g
-b_coef = 1.77e-8
+b_coef = 2.94e-8
 d_coef = 0.05 * b_coef
 L_arm = 0.060 * np.sin(np.pi / 4)
 
 # LIMITES DE RPM (Saturação)
-MAX_RPM = 31086.0
+MAX_RPM = 26423.0
 MAX_OMEGA = MAX_RPM * (2.0 * np.pi) / 60.0
 MAX_OMEGA_SQ = MAX_OMEGA**2
 
@@ -71,7 +71,7 @@ num_steps = int((t_span[1] - t_span[0]) / Ts) + 1
 t_eval = np.linspace(t_span[0], t_span[1], num_steps)
 
 # Valores dos parâmetros para testar
-amostras = 100
+amostras = 50
 extremidades = 1.0
 param1_values = np.linspace(-extremidades, extremidades, amostras)  # Parâmetro alpha1
 param2_values = np.linspace(-extremidades, extremidades, amostras)  # Parâmetro alpha2
@@ -564,6 +564,7 @@ if results:
         fontsize=14,
         fontweight="bold",
     )
+    """
     ax_relacao.axvline(
         x=1.0,
         color="red",
@@ -572,6 +573,7 @@ if results:
         alpha=0.7,
         label="Limite de Estabilidade",
     )
+    """
     ax_relacao.grid(True, alpha=0.3)
 
     # Adicionar legenda de cores
