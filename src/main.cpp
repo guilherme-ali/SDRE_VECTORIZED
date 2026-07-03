@@ -204,6 +204,7 @@ const float MAX_SAFE_TILT_DEG = 60.0f;
 const float MAX_SAFE_TILT_RAD = MAX_SAFE_TILT_DEG * DEG_TO_RAD;
 
 float initial_yaw = 0.0f; // travado no setup() para referencia relativa
+float yaw_setpoint = 0.0f; // heading acumulado: stick de yaw = taxa (rad/s), integrada a cada ciclo
 
 // ===== Callbacks WiFi =====
 
@@ -554,7 +555,12 @@ void loop(){
     if (remote_control_enabled && wifiComm.isClientConnected()) {
         phi_desired   = remote_command.roll  * DEG_TO_RAD;
         theta_desired = remote_command.pitch * DEG_TO_RAD;
-        yaw_desired   = remote_command.yaw   * DEG_TO_RAD;
+        // yaw do stick e taxa (rad/s), nao angulo (convencao CRTP: roll/pitch=angulo, yaw=taxa).
+        // Integra para formar o heading: stick centralizado -> taxa=0 -> mantem o angulo atual.
+        yaw_setpoint += (remote_command.yaw * DEG_TO_RAD) * SAMPLING_TIME_S;
+        while (yaw_setpoint >  PI) yaw_setpoint -= 2.0f * PI;
+        while (yaw_setpoint < -PI) yaw_setpoint += 2.0f * PI;
+        yaw_desired = yaw_setpoint;
 
         // Desnormaliza yaw_desired ao redor do yaw atual (erro em [-π,π]). Sem isso,
         // SDRE faz x[2]-r[2] linear e o drone gira pela rota longa em setpoints grandes.
