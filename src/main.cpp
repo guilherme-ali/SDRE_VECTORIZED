@@ -38,13 +38,18 @@ const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: 
 void updateSystemMatrix(float roll, float pitch, float yaw, float p, float q, float r, float omega_r);
 
 // ===== Parametros fisicos do drone (medidos) =====
-const float Ixx   = 16.57e-6f;  // kg·m^2 — inercia roll
-const float Iyy   = 16.57e-6f;  // kg·m^2 — inercia pitch
-const float Izz   = 29.80e-6f;  // kg·m^2 — inercia yaw
+const float Ixx   = 42.95e-6f;  // kg·m^2 — inercia roll
+const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
+const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
 const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0051f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
+// Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
+// fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
+// N=5 -> dt~25ms (fs~40Hz, margem 5x sobre o fc=8Hz usado na identificacao) ->
+// ~25s de voo em vez de ~5s a cada ciclo.
+const int TELEMETRY_DECIMATION_CYCLES = 5;
 
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
@@ -625,18 +630,22 @@ void loop(){
         t_lqr = sdre_t_updateMatrix + sdre_t_computeGains;  // telemetria
     }
 
-    // ----- Telemetria em RAM (somente quando armado) -----
+    // ----- Telemetria em RAM (somente quando armado, decimada por TELEMETRY_DECIMATION_CYCLES) -----
     // Custo: ~1 us — apenas escritas em RAM, sem printf nem I/O.
     if (motors.isArmed()) {
-        // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
-        // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
-        // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
-        telemetry.log(millis(),
-                      roll, pitch, yaw,
-                      -phi_desired, -theta_desired, -yaw_desired,
-                      p, q, r,
-                      u[0], u[1], u[2],
-                      w1_sq, w2_sq, w3_sq, w4_sq);
+        static uint32_t telemetry_cycle = 0;
+        if (telemetry_cycle % TELEMETRY_DECIMATION_CYCLES == 0) {
+            // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
+            // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
+            // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
+            telemetry.log(millis(),
+                          roll, pitch, yaw,
+                          -phi_desired, -theta_desired, -yaw_desired,
+                          p, q, r,
+                          u[0], u[1], u[2],
+                          w1_sq, w2_sq, w3_sq, w4_sq);
+        }
+        telemetry_cycle++;
     } else {
         // Desarmado: aceita comandos serial — 'D' dump CSV, 'R' reset buffer.
         if (Serial.available()) {
