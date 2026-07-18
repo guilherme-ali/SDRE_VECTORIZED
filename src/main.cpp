@@ -43,7 +43,7 @@ const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
 const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0051f;
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
 // Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
 // fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
@@ -200,7 +200,7 @@ bool skip_timing_sample     = false; // Ignora 1 amostra de tempo durante armame
 bool tilt_failsafe_latched  = false; // So libera com reset fisico do drone
 
 // Failsafe de tilt: 60° evita zona singular 1/cos(pitch) onde Ad explode.
-const float MAX_SAFE_TILT_DEG = 60.0f;
+const float MAX_SAFE_TILT_DEG = 80.0f;
 const float MAX_SAFE_TILT_RAD = MAX_SAFE_TILT_DEG * DEG_TO_RAD;
 
 float initial_yaw = 0.0f; // travado no setup() para referencia relativa
