@@ -58,7 +58,7 @@ const int TELEMETRY_DECIMATION_CYCLES = 5;
 //const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
 
 // helice 55mm (em uso)
-const float MOTOR_B_COEFF = 2.94e-8f;                      // N/(rad/s)^2 — empuxo medido
+const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
 const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
 
 const float MOTOR_D_COEFF = 0.05f * MOTOR_B_COEFF;         // N·m/(rad/s)^2 — drag (estimado)
