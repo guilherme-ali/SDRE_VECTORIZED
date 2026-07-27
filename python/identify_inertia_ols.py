@@ -95,7 +95,7 @@ DEFAULT_LOG = (
     LOG_DIR / "device-monitor-260602-174243.log"
 )  # melhor voo (excitação suficiente)
 DEFAULT_LOG = (
-    LOG_DIR / "device-monitor-260703-113154.log"
+    LOG_DIR / "device-monitor-260602-174243.log"
 )  # melhor voo (excitação suficiente
 
 # ─── Parsing (mesmo formato de plot_telemetry.py / identify_params.py) ────────
