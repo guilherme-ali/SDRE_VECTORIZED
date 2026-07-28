@@ -134,9 +134,13 @@ float Q[STATE_SIZE * STATE_SIZE] = {
 };
 
 // Torques fisicos maximos (aproximados) — usados pela regra de Bryson em R:
-const float max_tau_roll  = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA; // ~0.016 N·m
-const float max_tau_pitch = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA;
-const float max_tau_yaw   = 2.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA;  // ~0.018 N·m
+const float perc_tau_x_max = 0.5f;
+const float perc_tau_y_max = 0.5f;
+const float perc_tau_z_max = 0.5f;
+
+const float max_tau_roll  = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_x_max;
+const float max_tau_pitch = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_y_max;
+const float max_tau_yaw   = (4.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA) * perc_tau_z_max;
 
 // R_ii = 1 / (max_torque_i)^2
 const float R_11 = 1.0f / (max_tau_roll  * max_tau_roll);
