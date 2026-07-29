@@ -309,12 +309,17 @@ void calculateMotorOmegaSq(float thrust_signal, float u_torques[],
         return;
     }
 
-    // Pré-calcula os inversos para otimização
-    // Thrust: T = 4*b*ω²       → ω² = T/(4b)
-    // Torque roll/pitch: τ = 2*b*L*ω² → ω² = τ/(2bL)
-    // Torque yaw: τ = 4*d*ω²     → ω² = τ/(4d)
+    // Pré-calcula os inversos para otimização.
+    // ATENCAO: o denominador vem da INVERSA da matriz de alocacao, nao de um
+    // balanco escalar por eixo. Fatorando M = D*H, com D = diag(b, bL, bL, d) e H
+    // a matriz de sinais +-1 abaixo, as linhas de H sao ortogonais e H*H^T = 4*I,
+    // logo M^-1 = (1/4)*H^T*D^-1 — o fator 1/4 vale para os QUATRO eixos, porque
+    // os quatro motores participam de cada um deles (dois sobem, dois descem).
+    // Usar 1/(2bL) em roll/pitch (como estava ate 2026-07-28) aplica o DOBRO do
+    // torque comandado nesses dois eixos, dobrando o ganho de malha e derrubando
+    // a margem de fase — media medida em voo da razao tau_real/u: exatamente 2.000.
     float inv_4b  = 1.0f / (4.0f * b_coeff);
-    float inv_2bL = 1.0f / (2.0f * b_coeff * L_arm); // inclui L_arm (denominador do torque de roll/pitch)
+    float inv_4bL = 1.0f / (4.0f * b_coeff * L_arm); // inclui L_arm (denominador do torque de roll/pitch)
     float inv_4d  = 1.0f / (4.0f * d_coeff);
 
     // Extrai os sinais de controle
@@ -332,14 +337,14 @@ void calculateMotorOmegaSq(float thrust_signal, float u_torques[],
     // Matriz de alocação de controle inversa (ω² = T^(-1)*u), config X-quad.
     // Sinais da coluna de yaw invertidos para casar com o sentido fisico
     // (motores 2 e 4 CCW devem acelerar para u4 > 0).
-    // [ω1²]   [1/(4b)  -1/(2bL)   1/(2bL)  -1/(4d)] [u1]
-    // [ω2²] = [1/(4b)  -1/(2bL)  -1/(2bL)   1/(4d)] [u2]
-    // [ω3²]   [1/(4b)   1/(2bL)  -1/(2bL)  -1/(4d)] [u3]
-    // [ω4²]   [1/(4b)   1/(2bL)   1/(2bL)   1/(4d)] [u4]
-    w1_sq = u1 * inv_4b - u2 * inv_2bL + u3 * inv_2bL - u4 * inv_4d; // Motor 1 (FR, CW)
-    w2_sq = u1 * inv_4b - u2 * inv_2bL - u3 * inv_2bL + u4 * inv_4d; // Motor 2 (RR, CCW)
-    w3_sq = u1 * inv_4b + u2 * inv_2bL - u3 * inv_2bL - u4 * inv_4d; // Motor 3 (RL, CW)
-    w4_sq = u1 * inv_4b + u2 * inv_2bL + u3 * inv_2bL + u4 * inv_4d; // Motor 4 (FL, CCW)
+    // [ω1²]   [1/(4b)  -1/(4bL)   1/(4bL)  -1/(4d)] [u1]
+    // [ω2²] = [1/(4b)  -1/(4bL)  -1/(4bL)   1/(4d)] [u2]
+    // [ω3²]   [1/(4b)   1/(4bL)  -1/(4bL)  -1/(4d)] [u3]
+    // [ω4²]   [1/(4b)   1/(4bL)   1/(4bL)   1/(4d)] [u4]
+    w1_sq = u1 * inv_4b - u2 * inv_4bL + u3 * inv_4bL - u4 * inv_4d; // Motor 1 (FR, CW)
+    w2_sq = u1 * inv_4b - u2 * inv_4bL - u3 * inv_4bL + u4 * inv_4d; // Motor 2 (RR, CCW)
+    w3_sq = u1 * inv_4b + u2 * inv_4bL - u3 * inv_4bL - u4 * inv_4d; // Motor 3 (RL, CW)
+    w4_sq = u1 * inv_4b + u2 * inv_4bL + u3 * inv_4bL + u4 * inv_4d; // Motor 4 (FL, CCW)
 
     // Garante que não há valores negativos (motores não podem girar ao contrário)
     if (w1_sq < 0) w1_sq = 0;
