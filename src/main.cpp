@@ -203,7 +203,7 @@ bool motors_armed_by_remote = false; // True apos primeiro comando recebido
 bool skip_timing_sample     = false; // Ignora 1 amostra de tempo durante armamento
 bool tilt_failsafe_latched  = false; // So libera com reset fisico do drone
 
-// Failsafe de tilt: 60° evita zona singular 1/cos(pitch) onde Ad explode.
+// Failsafe de tilt: desarma antes da zona singular 1/cos(pitch) onde Ad explode.
 const float MAX_SAFE_TILT_DEG = 80.0f;
 const float MAX_SAFE_TILT_RAD = MAX_SAFE_TILT_DEG * DEG_TO_RAD;
 
@@ -521,7 +521,7 @@ void loop(){
         leds.setSystemReady(false);
         leds.setUDPReceiving(false);
 
-        Serial.println("\n🚨 FAILSAFE: inclinacao acima de 60 graus detectada!");
+        Serial.printf("\n🚨 FAILSAFE: inclinacao acima de %.0f graus detectada!\n", MAX_SAFE_TILT_DEG);
         Serial.printf("   Roll: %.2f deg | Pitch: %.2f deg\n",
                       roll * RAD_TO_DEG, pitch * RAD_TO_DEG);
         Serial.println("   Motores desligados. Reinicie o drone para rearmar.");
