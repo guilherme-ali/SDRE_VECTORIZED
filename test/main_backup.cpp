@@ -38,13 +38,18 @@ const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: 
 void updateSystemMatrix(float roll, float pitch, float yaw, float p, float q, float r, float omega_r);
 
 // ===== Parametros fisicos do drone (medidos) =====
-const float Ixx   = 16.57e-6f;  // kg·m^2 — inercia roll
-const float Iyy   = 16.57e-6f;  // kg·m^2 — inercia pitch
-const float Izz   = 29.80e-6f;  // kg·m^2 — inercia yaw
+const float Ixx   = 42.95e-6f;  // kg·m^2 — inercia roll
+const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
+const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0051f;
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
+// Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
+// fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
+// N=5 -> dt~25ms (fs~40Hz, margem 5x sobre o fc=8Hz usado na identificacao) ->
+// ~25s de voo em vez de ~5s a cada ciclo.
+const int TELEMETRY_DECIMATION_CYCLES = 5;
 
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
@@ -53,7 +58,7 @@ const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S
 //const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
 
 // helice 55mm (em uso)
-const float MOTOR_B_COEFF = 2.94e-8f;                      // N/(rad/s)^2 — empuxo medido
+const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
 const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
 
 const float MOTOR_D_COEFF = 0.05f * MOTOR_B_COEFF;         // N·m/(rad/s)^2 — drag (estimado)
@@ -129,9 +134,13 @@ float Q[STATE_SIZE * STATE_SIZE] = {
 };
 
 // Torques fisicos maximos (aproximados) — usados pela regra de Bryson em R:
-const float max_tau_roll  = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA; // ~0.016 N·m
-const float max_tau_pitch = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA;
-const float max_tau_yaw   = 2.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA;  // ~0.018 N·m
+const float perc_tau_x_max = 0.5f;
+const float perc_tau_y_max = 0.5f;
+const float perc_tau_z_max = 0.5f;
+
+const float max_tau_roll  = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_x_max;
+const float max_tau_pitch = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_y_max;
+const float max_tau_yaw   = (4.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA) * perc_tau_z_max;
 
 // R_ii = 1 / (max_torque_i)^2
 const float R_11 = 1.0f / (max_tau_roll  * max_tau_roll);
@@ -170,7 +179,7 @@ float accel_offset_y = -0.148659f;
 float accel_offset_z =  0.018737f;
 float gyro_offset_x  = -0.007760f;
 float gyro_offset_y  =  0.017851f;
-float gyro_offset_z  =  0.007761f;
+float gyro_offset_z  =  0.011061f;
 
 // ===== Calibracao QMC5883L (obtida via test/calibrate_magnetometer.cpp) =====
 const float MAG_OFFSET_X =  26.5f;   // Hard-iron
@@ -194,11 +203,12 @@ bool motors_armed_by_remote = false; // True apos primeiro comando recebido
 bool skip_timing_sample     = false; // Ignora 1 amostra de tempo durante armamento
 bool tilt_failsafe_latched  = false; // So libera com reset fisico do drone
 
-// Failsafe de tilt: 60° evita zona singular 1/cos(pitch) onde Ad explode.
-const float MAX_SAFE_TILT_DEG = 60.0f;
+// Failsafe de tilt: desarma antes da zona singular 1/cos(pitch) onde Ad explode.
+const float MAX_SAFE_TILT_DEG = 80.0f;
 const float MAX_SAFE_TILT_RAD = MAX_SAFE_TILT_DEG * DEG_TO_RAD;
 
 float initial_yaw = 0.0f; // travado no setup() para referencia relativa
+float yaw_setpoint = 0.0f; // heading acumulado: stick de yaw = taxa (rad/s), integrada a cada ciclo
 
 // ===== Callbacks WiFi =====
 
@@ -511,7 +521,7 @@ void loop(){
         leds.setSystemReady(false);
         leds.setUDPReceiving(false);
 
-        Serial.println("\n🚨 FAILSAFE: inclinacao acima de 60 graus detectada!");
+        Serial.printf("\n🚨 FAILSAFE: inclinacao acima de %.0f graus detectada!\n", MAX_SAFE_TILT_DEG);
         Serial.printf("   Roll: %.2f deg | Pitch: %.2f deg\n",
                       roll * RAD_TO_DEG, pitch * RAD_TO_DEG);
         Serial.println("   Motores desligados. Reinicie o drone para rearmar.");
@@ -549,7 +559,12 @@ void loop(){
     if (remote_control_enabled && wifiComm.isClientConnected()) {
         phi_desired   = remote_command.roll  * DEG_TO_RAD;
         theta_desired = remote_command.pitch * DEG_TO_RAD;
-        yaw_desired   = remote_command.yaw   * DEG_TO_RAD;
+        // yaw do stick e taxa (rad/s), nao angulo (convencao CRTP: roll/pitch=angulo, yaw=taxa).
+        // Integra para formar o heading: stick centralizado -> taxa=0 -> mantem o angulo atual.
+        yaw_setpoint += (remote_command.yaw * DEG_TO_RAD) * SAMPLING_TIME_S;
+        while (yaw_setpoint >  PI) yaw_setpoint -= 2.0f * PI;
+        while (yaw_setpoint < -PI) yaw_setpoint += 2.0f * PI;
+        yaw_desired = yaw_setpoint;
 
         // Desnormaliza yaw_desired ao redor do yaw atual (erro em [-π,π]). Sem isso,
         // SDRE faz x[2]-r[2] linear e o drone gira pela rota longa em setpoints grandes.
@@ -625,18 +640,22 @@ void loop(){
         t_lqr = sdre_t_updateMatrix + sdre_t_computeGains;  // telemetria
     }
 
-    // ----- Telemetria em RAM (somente quando armado) -----
+    // ----- Telemetria em RAM (somente quando armado, decimada por TELEMETRY_DECIMATION_CYCLES) -----
     // Custo: ~1 us — apenas escritas em RAM, sem printf nem I/O.
     if (motors.isArmed()) {
-        // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
-        // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
-        // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
-        telemetry.log(millis(),
-                      roll, pitch, yaw,
-                      -phi_desired, -theta_desired, -yaw_desired,
-                      p, q, r,
-                      u[0], u[1], u[2],
-                      w1_sq, w2_sq, w3_sq, w4_sq);
+        static uint32_t telemetry_cycle = 0;
+        if (telemetry_cycle % TELEMETRY_DECIMATION_CYCLES == 0) {
+            // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
+            // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
+            // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
+            telemetry.log(millis(),
+                          roll, pitch, yaw,
+                          -phi_desired, -theta_desired, -yaw_desired,
+                          p, q, r,
+                          u[0], u[1], u[2],
+                          w1_sq, w2_sq, w3_sq, w4_sq);
+        }
+        telemetry_cycle++;
     } else {
         // Desarmado: aceita comandos serial — 'D' dump CSV, 'R' reset buffer.
         if (Serial.available()) {
@@ -687,8 +706,8 @@ void loop(){
     float avgTime = (loopCount > 0) ? ((float)totalTime / loopCount) : 0.0f;
     
     if (PRINT_TELEMETRY) {
-        Serial.printf("Roll:%.2f,Pitch:%.2f,Yaw:%.2f,P:%.2f,Q:%.2f,R:%.2f\n", 
-                      roll * RAD_TO_DEG, pitch * RAD_TO_DEG, yaw * RAD_TO_DEG, 
+        Serial.printf(">roll:%.2f\n>pitch:%.2f\n>yaw:%.2f\n>p:%.2f\n>q:%.2f\n>r:%.2f\n",
+                      roll * RAD_TO_DEG, pitch * RAD_TO_DEG, yaw * RAD_TO_DEG,
                       p * RAD_TO_DEG, q * RAD_TO_DEG, r * RAD_TO_DEG);
     }
 
