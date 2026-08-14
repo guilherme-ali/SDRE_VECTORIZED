@@ -5,16 +5,20 @@ Biblioteca otimizada para cálculo de ganhos LQR em tempo real, projetada para s
 ## 📋 Características
 
 - **Caminho de produção `SDA_FIXED`** (fixed-point Q13.18) — default de `computeGains()`, derivado do SDA base
-- **7 métodos de solução DARE em `float`** (SDA, SDA-ss, ASDA, SDA Scaled, ADDA, Van Dooren, Iterativo)
+- **8 métodos de solução DARE em `float`** (SDA, SDA-ss, ASDA, SDA Scaled, ADDA, Schur, Van Dooren, Iterativo) — Schur não tem chamador no repositório (órfão)
 - **Operações matriciais otimizadas** para sistemas de pequeno/médio porte (`MatrixOperations`)
-- **Warm-start** automático para o método iterativo (P anterior como inicial)
-- **Baixo consumo de memória** — alocação única no construtor, sem `new` em runtime
+- **Warm-start** automático para o método iterativo (buffer dedicado, não compartilhado com os demais métodos)
+- Cada solver aloca seus buffers de trabalho por chamada (`new[]`/`delete[]`); só `SDA_FIXED` é alloc-free (stack)
 
 ## 🔧 Métodos Disponíveis
 
 ### Comparação de Performance (ESP32-S2 @ 240MHz)
 
 Sistema de teste: **6 estados × 3 controles**, **800 000 execuções** sob dinâmica real de quadricóptero (CBA 2026).
+
+> **Tabela pré-correção.** Medida antes do fix de SDA-SS/ASDA/SDA_SCALED/ADDA (ver aviso no topo).
+> As colunas "Falhas" e "Erro RMS" desta tabela refletiam os bugs algébricos, não o desempenho real
+> dos algoritmos — o resíduo aqui não era o resíduo da DARE (ver `getLastResidual()`, corrigido).
 
 #### Tempo de execução
 
@@ -53,6 +57,8 @@ lqr.computeGains("SDA_FIXED"); // equivalente, explícito
 - **Sem fallback automático**: em overflow/saturação ou matriz singular retorna `false`; quem chama
   mantém o `K` do ciclo anterior. Para forçar o caminho `float` exato, selecionar `"SDA"`.
 - Ver [seção dedicada](#-caminho-rápido-sda-em-ponto-fixo-q1318).
+- **Referência**: mesma recorrência de `"SDA"` (ver #1) — a aritmética Q13.18 é engenharia própria
+  deste projeto, sem paper específico.
 
 #### 1. SDA (Structure-preserving Doubling Algorithm) — referência `float`
 ```cpp
@@ -62,53 +68,105 @@ lqr.computeGains("SDA");
 - **Características**: Convergência quadrática, preserva estrutura simpléctica, aritmética `float` pura
 - **Complexidade**: O(n³) por iteração, ~8–10 iterações em regime
 - **Robustez comprovada**: 0 falhas em 800 000 execuções; menor erro RMS (9,36×10⁻⁷)
+- **Referência**: Chu, E.K.-W., Fan, H.-Y., Lin, W.-W., Wang, C.-S. "Structure-preserving
+  algorithms for periodic discrete-time algebraic Riccati equations." *Int. J. Control*
+  77(8):767-788, 2004 (box "SDA algorithm", p.770). Origem: Anderson, B.D.O. "Second-order
+  convergent algorithms for the steady-state Riccati equation." IEEE CDC, 1978 (eqs. 4a-4c).
 
-#### 2. SDA-ss (SDA com Single Shift)
+#### 2. SDA-ss (SDA com shift real único)
 ```cpp
 lqr.computeGains("SDA_SS");
 ```
-- **Melhor para**: Sistemas com autovalores próximos de 1
-- **Características**: Parâmetro de shift γ melhora convergência em casos difíceis
-- **Trade-off**: Ligeiramente mais lento, melhor robustez
+- **Melhor para**: Sistemas com autovalor dominante próximo de 1 (caso crítico do SDRE embarcado)
+- **Características**: Desloca o *pencil* simplético inteiro `M-γL, L-γM` (γ=0,5 fixo), preservando
+  autovetores e portanto `P` — ver derivação e prova numérica em `AutoLQR.cpp` e
+  `docs/auditoria_solvers_riccati.md`. A versão anterior deslocava só `A`, o que resolvia uma DARE
+  diferente (erro de até ~40 % confirmado em float64); corrigido nesta auditoria.
+- **Trade-off**: Reduz iterações quando há autovalor perto do círculo unitário; sem busca de γ ótimo
+  (Fibonacci, Chu-Fan-Lin 2005) — registrado como trabalho futuro.
+- **Referência**: Chu, E.K.-W., Fan, H.-Y., Lin, W.-W. "A structure-preserving doubling algorithm
+  for continuous-time algebraic Riccati equations." *Linear Algebra Appl.* 396:55-80, 2005
+  (técnica de shift γ com busca de Fibonacci; adaptada aqui de CARE→DARE para DARE→DARE). **Não**
+  é o SDA-ss de Guo-Iannazzo-Meini nem o *shrink-and-shift* de Bini-Meini-Poloni — aqueles são para
+  NARE não-simétrica de M-matriz, problema diferente da DARE simétrica deste projeto.
 
-#### 3. ASDA (Adaptive SDA)
+#### 3. ASDA (SDA com escalonamento adaptativo)
 ```cpp
 lqr.computeGains("ASDA");
 ```
-- **Melhor para**: Precisão máxima
-- **Características**: Escalonamento adaptativo durante iterações
-- **Vantagem**: Menor erro RMS entre os métodos SDA
+- **Características**: A cada iteração aplica `(G,H)→(sG,H/s)`, `s=√(‖H‖/‖G‖)`; o produto acumulado
+  `∏s_i` é revertido em `P = H_k·∏s_i` no final — a versão anterior não revertia (erro de até 7 ordens
+  de grandeza confirmado em float64); corrigido nesta auditoria.
+- **Referência**: Chu, E.K.-W., Fan, H.-Y., Lin, W.-W. "A structure-preserving doubling algorithm
+  for continuous-time algebraic Riccati equations." *Linear Algebra Appl.* 396:55-80, 2005 — mesmo
+  paper de `SDA_SS` (#2); cobre tanto a técnica de shift γ quanto o escalonamento adaptativo para
+  robustez numérica do SDA. Conteúdo integral não verificado por leitura direta (acesso ao texto
+  completo bloqueado nas fontes tentadas); citação confirmada pelo usuário.
 
 #### 4. SDA Scaled
 ```cpp
 lqr.computeGains("SDA_SCALED");
 ```
-- **Melhor para**: Sistemas mal-condicionados
-- **Características**: Pré-escalonamento do pencil Hamiltoniano
-- **Uso**: Quando matriz A tem normas de linha muito diferentes
+- **Melhor para**: Sistemas com normas de linha de `A` muito desiguais
+- **Características**: Balanceamento diagonal `Â=DAD⁻¹, Ĝ=DGD, Ĥ=D⁻¹QD⁻¹`, `P=D·P̂·D` (Ward, 1981).
+  A versão anterior tinha os expoentes de `D` invertidos em `Ĥ` e na extração de `P` (erro de até
+  6 ordens de grandeza confirmado em float64); corrigido nesta auditoria.
+- **Referência**: Ward, R.C. "Balancing the Generalized Eigenvalue Problem." *SIAM J. Sci. Stat.
+  Comput.* 2(2):141-152, 1981 (técnica geral de balanceamento; a heurística de `D` por norma de
+  linha usada aqui é uma simplificação própria do projeto, não o algoritmo iterativo completo do
+  paper). Nenhum dos 8 papers de `SOLVERS/` cobre esta técnica diretamente.
 
-#### 5. ADDA (Alternating-Directional Doubling Algorithm)
+#### 5. ADDA (SDA em forma alternada)
 ```cpp
 lqr.computeGains("ADDA");
 ```
-- **Características**: Usa duas matrizes auxiliares V e W simétricas
-- **⚠️ Atenção**: ~5 % de taxa de falha sob excitações estocásticas do voo (40 314 / 800 k testes). Apenas para sistemas bem-condicionados e suaves.
+- **Características**: Calcula `V=(I+GH)⁻¹` e usa a identidade *push-through*
+  `(I+HG)⁻¹H ≡ H(I+GH)⁻¹` na atualização de `H` — algebricamente **idêntico ao SDA**
+  (verificado: `‖P_ADDA-P_SDA‖/‖P_SDA‖ ~ 1e-16` em float64). A versão anterior calculava as duas
+  inversas `V` e `W` separadamente (mesmo resultado, custo extra). O ADDA de fato — dois parâmetros
+  de shift α≠β sobre a MARE não-simétrica, Wang, Wang & Li 2012 — não está implementado; portar para
+  a DARE simétrica é trabalho futuro (ver `docs/auditoria_solvers_riccati.md`).
+- **Referência**: Wang, W., Wang, W., Li, R.-C. "Alternating-Directional Doubling Algorithm for
+  M-Matrix Algebraic Riccati Equations." *SIAM J. Matrix Anal. Appl.* 33(1):170-194, 2012 — resolve
+  a **MARE** não-simétrica `XDX-AX-XB+C=0` de M-matriz, problema diferente da DARE simétrica deste
+  projeto. O que está implementado aqui sob este nome é o SDA (ver #1), não o algoritmo do paper.
 
 #### 6. Van Dooren (Extended Symplectic Pencil)
 ```cpp
 lqr.computeGains("VAN_DOOREN");
 ```
-- **Melhor para**: Robustez numérica
+- **Melhor para**: Robustez numérica; único método que funciona mesmo com `R` singular
 - **Características**: Usa pencil estendido (2n+m)×(2n+m) com deflação QR
-- **Trade-off**: Significativamente mais lento, usa decomposição QZ
+- **Trade-off**: Significativamente mais lento; usa autovetores individuais em vez do subespaço
+  deflacionário do QZ ordenado do paper original — mais frágil que o método publicado em casos
+  extremos (não corrigido nesta auditoria, ver `docs/auditoria_solvers_riccati.md`)
+- **Referência**: Van Dooren, P. "A Generalized Eigenvalue Approach for Solving Riccati Equations."
+  *SIAM J. Sci. Stat. Comput.* 2(2):121-135, 1981 (Problema II, eq. 44/59, DARE discreta)
+
+#### — Schur (órfão, sem chamador no repositório)
+```cpp
+lqr.computeGains("SCHUR");
+```
+- **Não recomendado**: `Eigen::ComplexSchur` sem reordenação — a seleção de colunas do subespaço
+  estável por índice diagonal não garante base do subespaço invariante correto. Resíduo medido de
+  ordens de grandeza $10^5$–$10^{10}$, `P` nem sempre positivo. Não corrigido nesta auditoria
+  (nenhum chamador no repositório usa este método).
+- **Referência**: Laub, A.J. "A Schur Method for Solving Algebraic Riccati Equations." *IEEE Trans.
+  Automat. Control* 24(6):913-921, 1979 — o método publicado usa QZ **reordenado**; a implementação
+  atual não reordena.
 
 #### 7. Iterativo (Riccati Iteration)
 ```cpp
 lqr.computeGains("ITERATIVE");
 ```
 - **Melhor para**: Alta precisão, warm-start
-- **Características**: Iteração direta da equação de Riccati
+- **Características**: Iteração direta da equação de Riccati (convergência **linear**, não
+  quadrática como o SDA); warm-start usa buffer dedicado (`P_warm`), não herda a solução de outro
+  método
 - **Vantagem**: Excelente com warm-start (solução anterior como inicial)
+- **Referência**: iteração de ponto-fixo clássica da DARE — não está em nenhum dos 8 papers de
+  `SOLVERS/`; ver, e.g., Lancaster, P., Rodman, L. *The Algebraic Riccati Equation.* Oxford
+  University Press, 1995 (cap. 2).
 
 ## 📊 Exemplo de Matriz K Resultante
 
@@ -310,11 +368,24 @@ AUTOLQR/
 
 ## 📚 Referências
 
-1. **SDA/ADDA**: Chu, E. K.-W., et al. "Structure-preserving doubling algorithms for Riccati equations." Numerical Linear Algebra with Applications, 2005.
+Uma linha por método (`computeGains("...")`), na ordem da seção [Descrição dos Métodos](#descrição-dos-métodos).
+Gabarito completo — com o que cada método *realmente* implementa vs. a referência citada, contraexemplos
+e prova em float64 — em `docs/auditoria_solvers_riccati.md`.
 
-2. **Van Dooren**: P. van Dooren, "A Generalized Eigenvalue Approach For Solving Riccati Equations", SIAM J. Sci. Stat. Comput., Vol.2(2), 1981.
+| # | Método | Referência |
+|---|---|---|
+| 0 | `SDA_FIXED` | Mesma de `SDA` (#1) — a aritmética Q13.18 é engenharia própria, sem paper específico |
+| 1 | `SDA` | Chu, E.K.-W., Fan, H.-Y., Lin, W.-W., Wang, C.-S. "Structure-preserving algorithms for periodic discrete-time algebraic Riccati equations." *Int. J. Control* 77(8):767-788, 2004 (box "SDA algorithm", p.770). Origem: Anderson, B.D.O. "Second-order convergent algorithms for the steady-state Riccati equation." IEEE CDC, 1978 (eqs. 4a-4c) |
+| 2 | `SDA_SS` | Chu, E.K.-W., Fan, H.-Y., Lin, W.-W. "A structure-preserving doubling algorithm for continuous-time algebraic Riccati equations." *Linear Algebra Appl.* 396:55-80, 2005 (shift γ com busca de Fibonacci; γ=0,5 fixo aqui, sem a busca) |
+| 3 | `ASDA` | Chu, E.K.-W., Fan, H.-Y., Lin, W.-W. "A structure-preserving doubling algorithm for continuous-time algebraic Riccati equations." *Linear Algebra Appl.* 396:55-80, 2005 — mesmo paper de `SDA_SS` (#2), técnica de escalonamento adaptativo |
+| 4 | `SDA_SCALED` | Ward, R.C. "Balancing the Generalized Eigenvalue Problem." *SIAM J. Sci. Stat. Comput.* 2(2):141-152, 1981 (a heurística de `D` por norma de linha usada aqui é simplificação própria, não o algoritmo iterativo completo do paper) |
+| 5 | `ADDA` | Implementado = SDA (#1) em forma alternada. Paper do ADDA de fato: Wang, W., Wang, W., Li, R.-C. "Alternating-Directional Doubling Algorithm for M-Matrix Algebraic Riccati Equations." *SIAM J. Matrix Anal. Appl.* 33(1):170-194, 2012 — resolve uma MARE não-simétrica, problema diferente, **não implementado** |
+| 6 | `VAN_DOOREN` | Van Dooren, P. "A Generalized Eigenvalue Approach for Solving Riccati Equations." *SIAM J. Sci. Stat. Comput.* 2(2):121-135, 1981 (Problema II, eq. 44/59) |
+| 7 | `ITERATIVE` | Iteração de ponto-fixo clássica — Lancaster, P., Rodman, L. *The Algebraic Riccati Equation.* Oxford University Press, 1995 (cap. 2) |
+| — | `SCHUR` (órfão) | Laub, A.J. "A Schur Method for Solving Algebraic Riccati Equations." *IEEE Trans. Automat. Control* 24(6):913-921, 1979 (o paper usa QZ reordenado; a implementação atual não reordena) |
 
-3. **SDRE**: Çimen, T. "State-Dependent Riccati Equation (SDRE) Control: A Survey." IFAC Proceedings Volumes, 2008.
+Contexto geral do SDRE: Çimen, T. "State-Dependent Riccati Equation (SDRE) Control: A Survey." IFAC
+Proceedings Volumes, 2008.
 
 ## 📄 Licença
 

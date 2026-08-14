@@ -60,7 +60,10 @@ static void add_q(const q16_t* a, const q16_t* b, q16_t* c, int n) {
 }
 // Inversão Gauss-Jordan fixed-point parametrizada pelo shift
 static bool invert_q(const q16_t* src, q16_t* dst, int n, int sh) {
-    static q16_t aug[6 * 12];
+    // Buffer na stack (não static) — sda_q()/invert_q() rodam em uma task
+    // FreeRTOS dedicada (ver src/main.cpp), mas um buffer static tornaria a
+    // função não-reentrante se algum dia houver mais de uma chamada concorrente.
+    q16_t aug[6 * 12];
     const int n2 = 2 * n;
     const q16_t one = f2q(1.0f, sh);
     const q16_t pivot_floor = f2q(1e-4f, sh);   // piso > resolução fixed-point
@@ -96,9 +99,10 @@ static bool invert_q(const q16_t* src, q16_t* dst, int n, int sh) {
 // Pout/Kout recebem P e K na representação fixed-point do shift sh.
 static bool sda_q(const q16_t* A, const q16_t* B, const q16_t* Q, const q16_t* R,
                   q16_t* Kout, q16_t* Pout, int n, int m, int sh) {
-    static q16_t Ak[36], Gk[36], Hk[36], Akn[36], Gkn[36], Hkn[36];
-    static q16_t Rinv[9], BT[18], AT[36], W[36], T1[36], T2[36], T3[36], BRi[18];
-    static q16_t BTP[18], BTPB[9], Rp[9], BTPA[18];
+    // Buffers na stack (não static) — mesma razão do invert_q() acima.
+    q16_t Ak[36], Gk[36], Hk[36], Akn[36], Gkn[36], Hkn[36];
+    q16_t Rinv[9], BT[18], AT[36], W[36], T1[36], T2[36], T3[36], BRi[18];
+    q16_t BTP[18], BTPB[9], Rp[9], BTPA[18];
     const int nn = n * n;
     const q16_t one = f2q(1.0f, sh);
     const int maxIter = 25;
@@ -163,10 +167,12 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
     , K(nullptr)
     , state(nullptr)
     , P(nullptr)
+    , P_warm(nullptr)
     , Kr(nullptr)
     , reference(nullptr)
     , lastIterations(-1)
     , lastResidual(-1.0f)
+    , lastStepDelta(-1.0f)
     , residualHistoryCount(0)
 {
     // Inicializar histórico de resíduos
@@ -182,6 +188,7 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
         K = new float[controlSize * stateSize]();
         state = new float[stateSize]();
         P = new float[stateSize * stateSize]();
+        P_warm = new float[stateSize * stateSize]();
         Kr = new float[controlSize * controlSize]();
         reference = new float[controlSize]();
     }
@@ -196,6 +203,7 @@ AutoLQR::~AutoLQR()
     delete[] K;
     delete[] state;
     delete[] P;
+    delete[] P_warm;
     delete[] Kr;
     delete[] reference;
 }
@@ -255,18 +263,20 @@ bool AutoLQR::computeGains(const char* method)
     } else if (strcmp(method, "ADDA") == 0) {
         K_flag = computeGainMatrixADDA();
     } else {
-        // Método padrão: SDA
+        // Método desconhecido: cai no default de computeGains(), SDA_FIXED
         Serial.print(F("Método desconhecido: "));
         Serial.print(method);
-        Serial.println(F(". Usando SDA."));
+        Serial.println(F(". Usando SDA_FIXED."));
         K_flag = computeGainMatrixSDA_Fixed();
     }
-    
+
     if (!K_flag)
         return false;
 
-    bool Kr_flag = computeGainMatrixKr();
-    return Kr_flag;
+    // computeGainMatrixKr() só formata Kr a partir de K já calculado — seu
+    // retorno não deve mascarar o sucesso/falha do cálculo do ganho principal.
+    computeGainMatrixKr();
+    return K_flag;
 }
 
 void AutoLQR::updateState(const float* currentState)
@@ -350,8 +360,67 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], Q_SHIFT);
 
     lastIterations = g_q_iters;
-    lastResidual   = 0.0f;         // direto (limitado por quantização, não iterativo)
+    residualHistoryCount = 0; // sda_q() não expõe resíduo por iteração (kernel fixed-point)
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm(); // resíduo real da DARE, calculado em float32
     return true;
+}
+
+// Resíduo REAL da DARE para o (A,B,Q,R,P) atuais — independente do critério
+// interno de parada de cada solver (ver AutoLQR.h: lastResidual vs lastStepDelta).
+float AutoLQR::computeDareResidualNorm() const
+{
+    if (!A || !B || !Q || !R || !P) return -1.0f;
+
+    const int n = stateSize;
+    const int m = controlSize;
+
+    float* AT    = new float[n * n];
+    float* BT    = new float[m * n];
+    float* PA    = new float[n * n];
+    float* ATPA  = new float[n * n];
+    float* PB    = new float[n * m];
+    float* BTPB  = new float[m * m];
+    float* BTPA  = new float[m * n];
+    float* S     = new float[m * m];
+    float* SinvBTPA = new float[m * n];
+    float* ATPB  = new float[n * m];
+    float* corr  = new float[n * n];
+
+    transposeMatrix(A, AT, n, n);
+    transposeMatrix(B, BT, n, m);
+
+    matrixMultiply(P, A, PA, n, n, n);
+    matrixMultiply(AT, PA, ATPA, n, n, n);
+    matrixMultiply(P, B, PB, n, n, m);
+    matrixMultiply(BT, PB, BTPB, m, n, m);
+    matrixMultiply(BT, PA, BTPA, m, n, n);
+
+    matrixAdd(R, BTPB, S, m, m);
+
+    float result;
+    if (!invertMatrix(S, S, m)) {
+        result = -2.0f; // R + B'PB singular
+    } else {
+        matrixMultiply(S, BTPA, SinvBTPA, m, m, n);
+        matrixMultiply(AT, PB, ATPB, n, n, m);
+        matrixMultiply(ATPB, SinvBTPA, corr, n, m, n);
+
+        float rNorm = 0.0f, qNorm = 0.0f;
+        for (int i = 0; i < n * n; i++) {
+            float v = ATPA[i] - P[i] - corr[i] + Q[i];
+            rNorm += v * v;
+            qNorm += Q[i] * Q[i];
+        }
+        rNorm = sqrtf(rNorm);
+        qNorm = sqrtf(qNorm);
+        result = (qNorm > 1e-20f) ? (rNorm / qNorm) : rNorm;
+    }
+
+    delete[] AT; delete[] BT; delete[] PA; delete[] ATPA; delete[] PB; delete[] BTPB;
+    delete[] BTPA; delete[] S; delete[] SinvBTPA; delete[] ATPB; delete[] corr;
+
+    return result;
 }
 
 bool AutoLQR::computeGainMatrixSDA()
@@ -426,7 +495,8 @@ bool AutoLQR::computeGainMatrixSDA()
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
     bool converged = false;
-    
+    float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
+
     // Inicializar histórico de resíduos
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -474,7 +544,7 @@ bool AutoLQR::computeGainMatrixSDA()
         norm_Hk = sqrtf(norm_Hk);
 
         // Resíduo relativo (como nos outros métodos)
-        float rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
+        rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
 
         // Armazenar resíduo no histórico (primeiras 10 iterações)
         if (iter < 10) {
@@ -490,23 +560,14 @@ bool AutoLQR::computeGainMatrixSDA()
         if (rel_diff < tolerance) {
             converged = true;
             lastIterations = iter + 1;
-            lastResidual = rel_diff;
+            lastStepDelta = rel_diff;
             break;
         }
     }
 
     if (!converged) {
         lastIterations = maxIterations;
-        float diff = 0.0f;
-        float norm_Hk = 0.0f;
-        for (int i = 0; i < stateSize * stateSize; i++) {
-            float d = Hk_next[i] - Hk[i];
-            diff += d * d;
-            norm_Hk += Hk[i] * Hk[i];
-        }
-        diff = sqrtf(diff);
-        norm_Hk = sqrtf(norm_Hk);
-        lastResidual = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
+        lastStepDelta = rel_diff; // último valor calculado dentro do loop (Hk já foi sobrescrito)
     }
 
     // P = Hk (solução final)
@@ -541,6 +602,8 @@ bool AutoLQR::computeGainMatrixSDA()
         // K = (R + B'·P·B)^(-1) · (B'·P·A)
         matrixMultiply(R_plus_BTPB, BT_P_A, K, controlSize, controlSize, stateSize);
     }
+
+    lastResidual = computeDareResidualNorm();
 
     // Limpeza
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -1191,31 +1254,32 @@ float AutoLQR::calculateExpectedCost()
 
 bool AutoLQR::computeGainMatrixIterative()
 {
-    // Método Iterativo de Riccati com Warm Start para DARE
-    
-    if (!A || !B || !Q || !R || !K || !P)
+    // Método Iterativo de Riccati com Warm Start para DARE.
+    // Warm-start usa P_warm (buffer dedicado), não o membro P genérico —
+    // este último pode conter a solução deixada por outro método na última
+    // chamada a computeGains(), o que faria o warm-start herdar um ponto de
+    // partida de um problema diferente do resolvido por este método.
+
+    if (!A || !B || !Q || !R || !K || !P || !P_warm)
         return false;
 
-    // Verificar warm start
-    bool has_warm_start = false;
-    float P_norm = 0.0f;
-    for (int i = 0; i < stateSize * stateSize; i++) {
-        P_norm += fabsf(P[i]);
-    }
-    has_warm_start = (P_norm > 1e-6f);
-
-    // Se não tem warm start, inicializa P = Q
-    if (!has_warm_start) {
-        matrixCopy(Q, P, stateSize * stateSize);
-    }
-
-    // Pré-alocação de memória
     const int n = stateSize;
     const int m = controlSize;
     const int nn = n * n;
     const int nm = n * m;
     const int mm = m * m;
-    
+
+    float Pw_norm = 0.0f;
+    for (int i = 0; i < nn; i++) Pw_norm += fabsf(P_warm[i]);
+    bool has_warm_start = (Pw_norm > 1e-6f);
+
+    float* Pw = new float[nn]();
+    if (has_warm_start) {
+        matrixCopy(P_warm, Pw, nn);
+    } else {
+        matrixCopy(Q, Pw, nn);
+    }
+
     float* P_new = new float[nn]();
     float* AT = new float[nn]();
     float* BT = new float[nm]();
@@ -1237,7 +1301,8 @@ bool AutoLQR::computeGainMatrixIterative()
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
     bool converged = false;
-    
+    float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
+
     // Inicializar histórico de resíduos
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -1248,38 +1313,38 @@ bool AutoLQR::computeGainMatrixIterative()
         // P_new = Q + A'PA - A'PB(R + B'PB)^{-1}B'PA
         // ================================================================
 
-        matrixMultiply(P, A, PA, n, n, n);
-        matrixMultiply(P, B, PB, n, n, m);
+        matrixMultiply(Pw, A, PA, n, n, n);
+        matrixMultiply(Pw, B, PB, n, n, m);
         matrixMultiply(AT, PA, ATPA, n, n, n);
         matrixMultiply(BT, PB, BTPB, m, n, m);
         matrixMultiply(BT, PA, BTPA, m, n, n);
-        
+
         matrixAdd(R, BTPB, S, m, m);
-        
+
         // Regularização
         for (int i = 0; i < m; i++) {
             S[i * m + i] += 1e-8f;
         }
-        
+
         matrixCopy(S, S_inv, mm);
         if (!invertMatrix(S_inv, S_inv, m)) {
             break;
         }
-        
+
         matrixMultiply(S_inv, BTPA, K_temp, m, m, n);
         matrixMultiply(AT, PB, ATPB, n, n, m);
         matrixMultiply(ATPB, K_temp, correction, n, m, n);
-        
+
         float diff = 0.0f;
         float P_norm = 0.0f;
-        
+
         for (int i = 0; i < nn; i++) {
             P_new[i] = Q[i] + ATPA[i] - correction[i];
-            float d = P_new[i] - P[i];
+            float d = P_new[i] - Pw[i];
             diff += d * d;
-            P_norm += P[i] * P[i];
+            P_norm += Pw[i] * Pw[i];
         }
-        
+
         // Forçar simetria
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
@@ -1288,55 +1353,45 @@ bool AutoLQR::computeGainMatrixIterative()
                 P_new[j * n + i] = avg;
             }
         }
-        
-        matrixCopy(P_new, P, nn);
+
+        matrixCopy(P_new, Pw, nn);
 
         diff = sqrtf(diff);
         P_norm = sqrtf(P_norm);
-        float rel_diff = (P_norm > 1e-10f) ? (diff / P_norm) : diff;
-        
+        rel_diff = (P_norm > 1e-10f) ? (diff / P_norm) : diff;
+
         // Armazenar resíduo no histórico (primeiras 10 iterações)
         if (iter < 10) {
             residualHistory[iter] = rel_diff;
             residualHistoryCount = iter + 1;
         }
-        
+
         if (rel_diff < tolerance) {
             converged = true;
             lastIterations = iter + 1;
-            lastResidual = rel_diff;
+            lastStepDelta = rel_diff;
             break;
         }
     }
-    
+
     if (!converged) {
         lastIterations = maxIterations;
-        // Calculate final residual
-        float diff = 0.0f;
-        float P_norm = 0.0f;
-        for (int i = 0; i < nn; i++) {
-            float d = P_new[i] - P[i];
-            diff += d * d;
-            P_norm += P[i] * P[i];
-        }
-        diff = sqrtf(diff);
-        P_norm = sqrtf(P_norm);
-        lastResidual = (P_norm > 1e-10f) ? (diff / P_norm) : diff;
+        lastStepDelta = rel_diff; // último valor calculado dentro do loop
     }
 
     // ================================================================
     // CÁLCULO FINAL DO GANHO K
     // ================================================================
-    matrixMultiply(P, A, PA, n, n, n);
-    matrixMultiply(P, B, PB, n, n, m);
+    matrixMultiply(Pw, A, PA, n, n, n);
+    matrixMultiply(Pw, B, PB, n, n, m);
     matrixMultiply(BT, PB, BTPB, m, n, m);
     matrixMultiply(BT, PA, BTPA, m, n, n);
-    
+
     matrixAdd(R, BTPB, S, m, m);
     for (int i = 0; i < m; i++) {
         S[i * m + i] += 1e-8f;
     }
-    
+
     matrixCopy(S, S_inv, mm);
     if (invertMatrix(S_inv, S_inv, m)) {
         matrixMultiply(S_inv, BTPA, K, m, m, n);
@@ -1344,7 +1399,15 @@ bool AutoLQR::computeGainMatrixIterative()
         converged = false;
     }
 
+    // Publica o resultado no P genérico (getRicattiSolution) e no buffer de
+    // warm-start dedicado (próxima chamada a este método, e só a este).
+    matrixCopy(Pw, P, nn);
+    matrixCopy(Pw, P_warm, nn);
+
+    lastResidual = computeDareResidualNorm();
+
     // Limpeza
+    delete[] Pw;
     delete[] P_new;
     delete[] AT;
     delete[] BT;
@@ -1367,6 +1430,29 @@ bool AutoLQR::computeGainMatrixIterative()
 // Versão melhorada do SDA com parâmetro de shift para convergência aprimorada
 // quando autovalores estão próximos de 1
 // ============================================================================
+// ============================================================================
+// SDA com single shift real, γ ∈ (0,1) — CORRIGIDO (ver plano, Fase 4.4).
+//
+// A versão anterior aplicava o shift só à matriz A, (A-γI)/(1-γ), sem shiftar
+// H, o que resolve uma DARE DIFERENTE da original (erro relativo confirmado
+// de ~10% a ~10^6× em outputs/verify_float64_mirror.csv). A construção abaixo
+// desloca o PENCIL simplético inteiro (M,L) — M=[A,0;-H,I], L=[I,G;0,A^T] — via
+// M'=M-γL, L'=L-γM, o que move os autovalores por λ↦(λ-γ)/(1-γλ) preservando
+// os AUTOVETORES (e portanto o subespaço deflacionário e P). Reduzindo (M',L')
+// de volta à forma SSF por eliminação em bloco (invertendo o pencil 2n×2n
+// N1=[[I-γA,-γG],[γH,I-γA^T]]) obtém-se (Â,Ĝ,Ĥ) tal que o SDA padrão aplicado
+// a eles converge para o MESMO P da DARE original — verificado numericamente
+// em outputs/verify_float64_mirror.csv (erro vs. scipy ~1e-14 para γ∈{0.1..0.99}
+// em sistemas aleatórios e no caso de hover real, com ganho de até ~2x menos
+// iterações quando o autovalor dominante está perto do círculo unitário).
+//
+// γ=0.5 é usado como padrão fixo (testado sempre ajuda ou é neutro). O paper
+// que fundamenta a técnica de shift para SDA simétrico, Chu, Fan & Lin (2005),
+// Linear Algebra Appl. 396:55-80, propõe uma busca de Fibonacci para o γ
+// ótimo; essa busca NÃO foi implementada aqui (ver docs/auditoria_solvers_riccati.md,
+// registrado como trabalho futuro) — o valor fixo já corrige o bug algébrico,
+// que era o problema crítico.
+// ============================================================================
 bool AutoLQR::computeGainMatrixSDA_SS()
 {
     if (!A || !B || !Q || !R || !K || !P)
@@ -1380,189 +1466,205 @@ bool AutoLQR::computeGainMatrixSDA_SS()
     const int m = controlSize;
     const int nn = n * n;
     const int mm = m * m;
+    const int n2 = 2 * n;
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
-    
-    // ========================================================================
-    // SDA com Single Shift: Transforma o problema para acelerar convergência
-    // O shift γ transforma autovalores λ → (λ-γ)/(1-γλ)
-    // Escolha ótima: γ próximo ao maior autovalor instável do Hamiltoniano
-    // Para DARE típico, γ = 0.5 a 0.9 funciona bem
-    // ========================================================================
-    float gamma = 0.3f;  // Shift real (não 1.0!)
+
+    const float gamma = 0.5f;
     bool converged = false;
-    float prev_diff = 1e10f;
-    
-    // Alocação de memória
+    float rel_diff = 1.0f;
+
+    float* R_inv = new float[mm]();
+    float* BT = new float[m * n]();
+    float* G0 = new float[nn]();
+
+    transposeMatrix(B, BT, n, m);
+    matrixCopy(R, R_inv, mm);
+    bool init_ok = invertMatrix(R_inv, R_inv, m);
+
+    if (!init_ok) {
+        delete[] R_inv; delete[] BT; delete[] G0;
+        return false;
+    }
+
+    {
+        float* B_Rinv = new float[n * m];
+        matrixMultiply(B, R_inv, B_Rinv, n, m, m);
+        matrixMultiply(B_Rinv, BT, G0, n, m, n);
+        delete[] B_Rinv;
+    }
+
+    // ------------------------------------------------------------------
+    // Monta N1 = [[I-γA, -γG0], [γH0, I-γA']] (2n×2n) e inverte para obter
+    // Φ = N1^-1, cujos blocos dão a construção que preserva P.
+    // ------------------------------------------------------------------
+    float* N1  = new float[n2 * n2]();
+    float* Phi = new float[n2 * n2]();
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            float aij = A[i * n + j];
+            N1[i * n2 + j]             = (i == j ? 1.0f : 0.0f) - gamma * aij;       // I-γA
+            N1[i * n2 + (n + j)]       = -gamma * G0[i * n + j];                     // -γG0
+            N1[(n + i) * n2 + j]       = gamma * Q[i * n + j];                       // γH0 (H0=Q)
+            N1[(n + i) * n2 + (n + j)] = (i == j ? 1.0f : 0.0f) - gamma * A[j * n + i]; // I-γA'
+        }
+    }
+
+    if (!invertMatrix(N1, Phi, n2)) {
+        delete[] R_inv; delete[] BT; delete[] G0; delete[] N1; delete[] Phi;
+        return false;
+    }
+
+    float* Phi11 = new float[nn]();
+    float* Phi12 = new float[nn]();
+    float* Phi21 = new float[nn]();
+    float* Phi22 = new float[nn]();
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            Phi11[i * n + j] = Phi[i * n2 + j];
+            Phi12[i * n + j] = Phi[i * n2 + (n + j)];
+            Phi21[i * n + j] = Phi[(n + i) * n2 + j];
+            Phi22[i * n + j] = Phi[(n + i) * n2 + (n + j)];
+        }
+    }
+    delete[] N1; delete[] Phi;
+
+    // AmG = A-γI, ATmG = A'-γI
+    float* AmG  = new float[nn]();
+    float* ATmG = new float[nn]();
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            float aij = A[i * n + j];
+            AmG[i * n + j]  = aij - (i == j ? gamma : 0.0f);
+            ATmG[i * n + j] = A[j * n + i] - (i == j ? gamma : 0.0f);
+        }
+    }
+
+    // Â = Φ11·(A-γI) - Φ12·H0 ;  Ĝ = Φ11·G0 + Φ12·(A'-γI) ;  Ĥ = -Φ21·(A-γI) + Φ22·H0
     float* Ak = new float[nn]();
     float* Gk = new float[nn]();
     float* Hk = new float[nn]();
-    
+    float* Temp1 = new float[nn]();
+    float* Temp2 = new float[nn]();
+
+    matrixMultiply(Phi11, AmG, Temp1, n, n, n);
+    matrixMultiply(Phi12, Q, Temp2, n, n, n);
+    matrixSubtract(Temp1, Temp2, Ak, n, n);
+
+    matrixMultiply(Phi11, G0, Temp1, n, n, n);
+    matrixMultiply(Phi12, ATmG, Temp2, n, n, n);
+    matrixAdd(Temp1, Temp2, Gk, n, n);
+
+    matrixMultiply(Phi21, AmG, Temp1, n, n, n);
+    matrixMultiply(Phi22, Q, Temp2, n, n, n);
+    matrixSubtract(Temp2, Temp1, Hk, n, n);
+
+    delete[] Phi11; delete[] Phi12; delete[] Phi21; delete[] Phi22;
+    delete[] AmG; delete[] ATmG; delete[] G0;
+
+    // ------------------------------------------------------------------
+    // Loop SDA padrão sobre (Ak,Gk,Hk) — o P resultante já é o da DARE
+    // original (ver comentário acima); K usa o A original.
+    // ------------------------------------------------------------------
     float* Ak_next = new float[nn]();
     float* Gk_next = new float[nn]();
     float* Hk_next = new float[nn]();
-    
-    float* R_inv = new float[mm]();
-    float* BT = new float[m * n]();
     float* AT = new float[nn]();
-    float* W = new float[nn]();
-    float* Temp1 = new float[nn]();
-    float* Temp2 = new float[nn]();
+    float* W  = new float[nn]();
     float* Temp3 = new float[nn]();
-    float* I_gamma = new float[nn]();  // Matriz para shift
-    
-    // Inicialização com shift aplicado ao sistema
-    // A_shifted = (A - γI)/(1 - γ) para transformar o problema
-    matrixCopy(A, Ak, nn);
-    
-    // Aplicar shift na matriz A: Ak = A - γ·I (primeira parte da transformação)
-    for (int i = 0; i < n; i++) {
-        Ak[i * n + i] -= gamma;
-    }
-    // Normalizar: Ak = Ak / (1 - γ)
-    float inv_1_minus_gamma = 1.0f / (1.0f - gamma);
-    for (int i = 0; i < nn; i++) {
-        Ak[i] *= inv_1_minus_gamma;
-    }
-    
-    transposeMatrix(Ak, AT, n, n);
-    transposeMatrix(B, BT, n, m);
-    
-    // Calcular R_inv
-    matrixCopy(R, R_inv, mm);
-    bool init_ok = invertMatrix(R_inv, R_inv, m);
-    
-    if (init_ok) {
-        // Gk = B * R^(-1) * B' / (1-γ)²
-        float* B_Rinv = new float[n * m];
-        matrixMultiply(B, R_inv, B_Rinv, n, m, m);
-        matrixMultiply(B_Rinv, BT, Gk, n, m, n);
-        delete[] B_Rinv;
-        
-        // Escalar Gk pelo fator do shift
-        float scale_G = inv_1_minus_gamma * inv_1_minus_gamma;
+
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+
+    for (int iter = 0; iter < maxIterations; iter++) {
+        matrixMultiply(Gk, Hk, Temp1, n, n, n);
+        for (int i = 0; i < n; i++) Temp1[i * n + i] += 1.0f;
+
+        matrixCopy(Temp1, W, nn);
+        if (!invertMatrix(W, W, n)) break;
+
+        matrixMultiply(Ak, W, Temp1, n, n, n);
+        matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
+
+        transposeMatrix(Ak, AT, n, n);
+        matrixMultiply(Gk, AT, Temp2, n, n, n);
+        matrixMultiply(Temp1, Temp2, Temp3, n, n, n);
+        matrixAdd(Gk, Temp3, Gk_next, n, n);
+
+        matrixMultiply(W, Ak, Temp2, n, n, n);
+        matrixMultiply(Hk, Temp2, Temp3, n, n, n);
+        matrixMultiply(AT, Temp3, Temp2, n, n, n);
+        matrixAdd(Hk, Temp2, Hk_next, n, n);
+
+        float diff = 0.0f, norm_Hk = 0.0f;
         for (int i = 0; i < nn; i++) {
-            Gk[i] *= scale_G;
+            float d = Hk_next[i] - Hk[i];
+            diff += d * d;
+            norm_Hk += Hk[i] * Hk[i];
         }
-        
-        // Hk = Q (sem alteração)
-        matrixCopy(Q, Hk, nn);
-        
-        // Inicializar histórico de resíduos
-        residualHistoryCount = 0;
-        for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+        diff = sqrtf(diff);
+        norm_Hk = sqrtf(norm_Hk);
+        rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
 
-        // Loop SDA com shift (as iterações são as mesmas, mas sobre sistema transformado)
-        for (int iter = 0; iter < maxIterations; iter++) {
-            matrixMultiply(Gk, Hk, Temp1, n, n, n);
-            for (int i = 0; i < n; i++) {
-                Temp1[i * n + i] += 1.0f;
-            }
-            
-            matrixCopy(Temp1, W, nn);
-            if (!invertMatrix(W, W, n)) {
-                break;
-            }
-            
-            matrixMultiply(Ak, W, Temp1, n, n, n);
-            matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
-            
-            transposeMatrix(Ak, AT, n, n);
-            matrixMultiply(Gk, AT, Temp2, n, n, n);
-            matrixMultiply(Temp1, Temp2, Temp3, n, n, n);
-            matrixAdd(Gk, Temp3, Gk_next, n, n);
-            
-            matrixMultiply(W, Ak, Temp2, n, n, n);
-            matrixMultiply(Hk, Temp2, Temp3, n, n, n);
-            matrixMultiply(AT, Temp3, Temp2, n, n, n);
-            matrixAdd(Hk, Temp2, Hk_next, n, n);
-            
-            float diff = 0.0f;
-            float norm_Hk = 0.0f;
-            for (int i = 0; i < nn; i++) {
-                diff += (Hk_next[i] - Hk[i]) * (Hk_next[i] - Hk[i]);
-                norm_Hk += Hk[i] * Hk[i];
-            }
-            diff = sqrtf(diff);
-            norm_Hk = sqrtf(norm_Hk);
-            
-            float rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
-            
-            // Armazenar resíduo no histórico (primeiras 10 iterações)
-            if (iter < 10) {
-                residualHistory[iter] = rel_diff;
-                residualHistoryCount = iter + 1;
-            }
-            
-            prev_diff = rel_diff;
-            
-            matrixCopy(Ak_next, Ak, nn);
-            matrixCopy(Gk_next, Gk, nn);
-            matrixCopy(Hk_next, Hk, nn);
-            
-            if (rel_diff < tolerance) {
-                converged = true;
-                lastIterations = iter + 1;
-                lastResidual = rel_diff;
-                break;
-            }
-        }
-        
-        if (!converged) {
-            lastIterations = maxIterations;
-            float diff_final = 0.0f;
-            float norm_Hk_final = 0.0f;
-            for (int i = 0; i < nn; i++) {
-                diff_final += (Hk_next[i] - Hk[i]) * (Hk_next[i] - Hk[i]);
-                norm_Hk_final += Hk[i] * Hk[i];
-            }
-            diff_final = sqrtf(diff_final);
-            norm_Hk_final = sqrtf(norm_Hk_final);
-            lastResidual = (norm_Hk_final > 1e-10f) ? (diff_final / norm_Hk_final) : diff_final;
+        if (iter < 10) {
+            residualHistory[iter] = rel_diff;
+            residualHistoryCount = iter + 1;
         }
 
-        // P = Hk
-        matrixCopy(Hk, P, nn);
-        
-        // Forçar simetria
-        for (int i = 0; i < n; i++) {
-            for (int j = i + 1; j < n; j++) {
-                float avg = (P[i * n + j] + P[j * n + i]) * 0.5f;
-                P[i * n + j] = avg;
-                P[j * n + i] = avg;
-            }
-        }
+        matrixCopy(Ak_next, Ak, nn);
+        matrixCopy(Gk_next, Gk, nn);
+        matrixCopy(Hk_next, Hk, nn);
 
-        // Cálculo do ganho K usando A ORIGINAL (não a transformada pelo shift)
-        // K = (R + B'·P·B)^(-1) · B'·P·A
+        if (rel_diff < tolerance) {
+            converged = true;
+            lastIterations = iter + 1;
+            lastStepDelta = rel_diff;
+            break;
+        }
+    }
+
+    if (!converged) {
+        lastIterations = maxIterations;
+        lastStepDelta = rel_diff;
+    }
+
+    matrixCopy(Hk, P, nn);
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            float avg = (P[i * n + j] + P[j * n + i]) * 0.5f;
+            P[i * n + j] = avg;
+            P[j * n + i] = avg;
+        }
+    }
+
+    // K = (R + B'PB)^-1 B'PA, com A original
+    {
         float* BT_P = new float[m * n];
         float* BT_P_B = new float[mm];
         float* BT_P_A = new float[m * n];
         float* R_plus_BTPB = new float[mm];
-        
+
         matrixMultiply(BT, P, BT_P, m, n, n);
         matrixMultiply(BT_P, B, BT_P_B, m, n, m);
         matrixAdd(R, BT_P_B, R_plus_BTPB, m, m);
-        
+
         if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
             converged = false;
         } else {
-            // Usa A original, não Ak (que foi transformada pelo shift)
             matrixMultiply(BT_P, A, BT_P_A, m, n, n);
             matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
         }
-        
-        delete[] BT_P;
-        delete[] BT_P_B;
-        delete[] BT_P_A;
-        delete[] R_plus_BTPB;
+
+        delete[] BT_P; delete[] BT_P_B; delete[] BT_P_A; delete[] R_plus_BTPB;
     }
 
+    lastResidual = computeDareResidualNorm();
+
+    delete[] R_inv; delete[] BT;
     delete[] Ak; delete[] Gk; delete[] Hk;
     delete[] Ak_next; delete[] Gk_next; delete[] Hk_next;
-    delete[] R_inv; delete[] BT; delete[] AT;
-    delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
-    delete[] I_gamma;
+    delete[] AT; delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
 
     return converged;
 }
@@ -1570,6 +1672,18 @@ bool AutoLQR::computeGainMatrixSDA_SS()
 // ============================================================================
 // SDA ADAPTATIVO (ASDA)
 // Usa escalonamento adaptativo durante iterações para melhor estabilidade
+// ============================================================================
+// ============================================================================
+// ASDA (SDA com escalonamento adaptativo) — CORRIGIDO (ver plano, Fase 4.2).
+//
+// A recorrência do SDA é invariante sob (G,H) -> (s·G, H/s): o produto G·H
+// (logo W) não muda, então H_k converge para P/∏s_i, não para P. A versão
+// anterior fazia P = H_k direto, sem desfazer o produto acumulado dos s_i, e
+// aplicava β² só em G na inicialização (sem dividir H) — dois bugs, cada um
+// verificado numericamente (outputs/verify_float64_mirror.csv: resíduo de até
+// 2e7 em float64, ou seja, bug de fórmula e não de precisão). A correção
+// aplica o mesmo fator ao par (G,H) sempre, acumula cum_s = ∏s_i, e devolve
+// P = H_k · cum_s.
 // ============================================================================
 bool AutoLQR::computeGainMatrixASDA()
 {
@@ -1587,16 +1701,18 @@ bool AutoLQR::computeGainMatrixASDA()
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
     bool converged = false;
-    
+    float rel_diff = 1.0f;
+    float cum_s = 1.0f; // produto acumulado dos fatores de escala (para desfazer em P)
+
     // Alocação de memória
     float* Ak = new float[nn]();
     float* Gk = new float[nn]();
     float* Hk = new float[nn]();
-    
+
     float* Ak_next = new float[nn]();
     float* Gk_next = new float[nn]();
     float* Hk_next = new float[nn]();
-    
+
     float* R_inv = new float[mm]();
     float* BT = new float[m * n]();
     float* AT = new float[nn]();
@@ -1604,57 +1720,51 @@ bool AutoLQR::computeGainMatrixASDA()
     float* Temp1 = new float[nn]();
     float* Temp2 = new float[nn]();
     float* Temp3 = new float[nn]();
-    
-    // Fatores de escalonamento adaptativo
-    float alpha_k = 1.0f;
-    float beta_k = 1.0f;
-    
+
     // Inicialização ASDA
     matrixCopy(A, Ak, nn);
     transposeMatrix(A, AT, n, n);
     transposeMatrix(B, BT, n, m);
-    
+
     matrixCopy(R, R_inv, mm);
     bool init_ok = invertMatrix(R_inv, R_inv, m);
-    
+
     if (init_ok) {
         float* B_Rinv = new float[n * m];
         matrixMultiply(B, R_inv, B_Rinv, n, m, m);
         matrixMultiply(B_Rinv, BT, Gk, n, m, n);
         delete[] B_Rinv;
-        
+
         matrixCopy(Q, Hk, nn);
-        
-        // Cálculo do escalonamento ótimo inicial
-        float norm_A = 0.0f, norm_G = 0.0f, norm_H = 0.0f;
+
+        // Escalonamento ótimo inicial: G←s0·G, H←H/s0 (eq. correta — aplicado
+        // aos DOIS, não só a G), com s0 = sqrt(‖H‖/‖G‖).
+        float norm_G = 0.0f, norm_H = 0.0f;
         for (int i = 0; i < nn; i++) {
-            norm_A += Ak[i] * Ak[i];
             norm_G += Gk[i] * Gk[i];
             norm_H += Hk[i] * Hk[i];
         }
-        norm_A = sqrtf(norm_A);
         norm_G = sqrtf(norm_G);
         norm_H = sqrtf(norm_H);
-        
-        if (norm_A > 1e-10f) {
-            alpha_k = 1.0f / norm_A;
-        }
+
+        float s0 = 1.0f;
         if (norm_H > 1e-10f && norm_G > 1e-10f) {
-            beta_k = sqrtf(norm_H / norm_G);
+            s0 = sqrtf(norm_H / norm_G);
+            s0 = fminf(fmaxf(s0, 0.1f), 10.0f);
         }
-        
-        // Aplicar escalonamento inicial
         for (int i = 0; i < nn; i++) {
-            Gk[i] *= (beta_k * beta_k);
+            Gk[i] *= s0;
+            Hk[i] /= s0;
         }
-        
+        cum_s *= s0;
+
         // Inicializar histórico de resíduos
         residualHistoryCount = 0;
         for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
 
         // Loop ASDA
         for (int iter = 0; iter < maxIterations; iter++) {
-            // Passo 1: Calcular escalonamento adaptativo
+            // Passo 1: escalonamento adaptativo
             float norm_Gk = 0.0f, norm_Hk = 0.0f;
             for (int i = 0; i < nn; i++) {
                 norm_Gk += Gk[i] * Gk[i];
@@ -1662,42 +1772,43 @@ bool AutoLQR::computeGainMatrixASDA()
             }
             norm_Gk = sqrtf(norm_Gk);
             norm_Hk = sqrtf(norm_Hk);
-            
+
             float scale_factor = 1.0f;
             if (norm_Gk > 1e-10f && norm_Hk > 1e-10f) {
                 scale_factor = sqrtf(norm_Hk / norm_Gk);
                 scale_factor = fminf(fmaxf(scale_factor, 0.1f), 10.0f);
             }
-            
+
             for (int i = 0; i < nn; i++) {
                 Gk[i] *= scale_factor;
                 Hk[i] /= scale_factor;
             }
-            
+            cum_s *= scale_factor;
+
             // Passo 2: Iteração SDA padrão
             matrixMultiply(Gk, Hk, Temp1, n, n, n);
             for (int i = 0; i < n; i++) {
                 Temp1[i * n + i] += 1.0f;
             }
-            
+
             matrixCopy(Temp1, W, nn);
             if (!invertMatrix(W, W, n)) {
                 break;
             }
-            
+
             matrixMultiply(Ak, W, Temp1, n, n, n);
             matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
-            
+
             transposeMatrix(Ak, AT, n, n);
             matrixMultiply(Gk, AT, Temp2, n, n, n);
             matrixMultiply(Temp1, Temp2, Temp3, n, n, n);
             matrixAdd(Gk, Temp3, Gk_next, n, n);
-            
+
             matrixMultiply(W, Ak, Temp2, n, n, n);
             matrixMultiply(Hk, Temp2, Temp3, n, n, n);
             matrixMultiply(AT, Temp3, Temp2, n, n, n);
             matrixAdd(Hk, Temp2, Hk_next, n, n);
-            
+
             float diff = 0.0f;
             float norm_H_new = 0.0f;
             for (int i = 0; i < nn; i++) {
@@ -1707,44 +1818,37 @@ bool AutoLQR::computeGainMatrixASDA()
             }
             diff = sqrtf(diff);
             norm_H_new = sqrtf(norm_H_new);
-            
-            float rel_diff = (norm_H_new > 1e-10f) ? (diff / norm_H_new) : diff;
-            
+
+            rel_diff = (norm_H_new > 1e-10f) ? (diff / norm_H_new) : diff;
+
             // Armazenar resíduo no histórico (primeiras 10 iterações)
             if (iter < 10) {
                 residualHistory[iter] = rel_diff;
                 residualHistoryCount = iter + 1;
             }
-            
+
             matrixCopy(Ak_next, Ak, nn);
             matrixCopy(Gk_next, Gk, nn);
             matrixCopy(Hk_next, Hk, nn);
-            
+
             if (rel_diff < tolerance) {
                 converged = true;
                 lastIterations = iter + 1;
-                lastResidual = rel_diff;
+                lastStepDelta = rel_diff;
                 break;
             }
         }
-        
+
         if (!converged) {
             lastIterations = maxIterations;
-            float diff_final = 0.0f;
-            float norm_H_final = 0.0f;
-            for (int i = 0; i < nn; i++) {
-                float d = Hk_next[i] - Hk[i];
-                diff_final += d * d;
-                norm_H_final += Hk_next[i] * Hk_next[i];
-            }
-            diff_final = sqrtf(diff_final);
-            norm_H_final = sqrtf(norm_H_final);
-            lastResidual = (norm_H_final > 1e-10f) ? (diff_final / norm_H_final) : diff_final;
+            lastStepDelta = rel_diff;
         }
 
-        // P = Hk
-        matrixCopy(Hk, P, nn);
-        
+        // P = Hk · cum_s (desfaz o escalonamento acumulado — ver comentário acima)
+        for (int i = 0; i < nn; i++) {
+            P[i] = Hk[i] * cum_s;
+        }
+
         // Forçar simetria
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
@@ -1759,22 +1863,24 @@ bool AutoLQR::computeGainMatrixASDA()
         float* BT_P_B = new float[mm];
         float* BT_P_A = new float[m * n];
         float* R_plus_BTPB = new float[mm];
-        
+
         matrixMultiply(BT, P, BT_P, m, n, n);
         matrixMultiply(BT_P, B, BT_P_B, m, n, m);
         matrixAdd(R, BT_P_B, R_plus_BTPB, m, m);
-        
+
         if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
             converged = false;
         } else {
             matrixMultiply(BT_P, A, BT_P_A, m, n, n);
             matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
         }
-        
+
         delete[] BT_P;
         delete[] BT_P_B;
         delete[] BT_P_A;
         delete[] R_plus_BTPB;
+
+        lastResidual = computeDareResidualNorm();
     }
 
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -1788,6 +1894,16 @@ bool AutoLQR::computeGainMatrixASDA()
 // ============================================================================
 // SDA COM ESCALONAMENTO ÓTIMO (Scaled SDA)
 // Usa escalonamento ótimo do pencil Hamiltoniano para melhor condicionamento
+// ============================================================================
+// ============================================================================
+// SDA com balanceamento diagonal do pencil — CORRIGIDO (ver plano, Fase 4.3).
+//
+// Para a similaridade Â=DAD⁻¹, Ĝ=DGD (já corretas antes), a convenção
+// consistente exige Ĥ=D⁻¹QD⁻¹ e, na volta, P=D·P̂·D. A versão anterior usava
+// Ĥ=DQD e P=D⁻¹P̂D⁻¹ — os DOIS expoentes de D invertidos, e os erros não se
+// cancelam (verificado: resíduo de até 1e6 em float64, outputs/
+// verify_float64_mirror.csv). Fórmula pelo balanceamento de Ward (1981),
+// SIAM JSSC 2(2):141-152.
 // ============================================================================
 bool AutoLQR::computeGainMatrixSDA_Scaled()
 {
@@ -1805,7 +1921,8 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
     bool converged = false;
-    
+    float rel_diff = 1.0f;
+
     // Alocação de memória
     float* Ak = new float[nn]();
     float* Gk = new float[nn]();
@@ -1877,10 +1994,10 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         delete[] B_Rinv;
         delete[] BT_scaled;
         
-        // Q_scaled = D * Q * D
+        // H0 = D^-1 * Q * D^-1 (convenção correta: Â=DAD⁻¹,Ĝ=DGD,Ĥ=D⁻¹QD⁻¹)
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
-                Hk[i * n + j] = D[i] * Q[i * n + j] * D[j];
+                Hk[i * n + j] = Dinv[i] * Q[i * n + j] * Dinv[j];
             }
         }
         
@@ -1922,9 +2039,9 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
             }
             diff = sqrtf(diff);
             norm_H = sqrtf(norm_H);
-            
-            float rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
-            
+
+            rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
+
             // Armazenar resíduo no histórico (primeiras 10 iterações)
             if (iter < 10) {
                 residualHistory[iter] = rel_diff;
@@ -1938,29 +2055,20 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
             if (rel_diff < tolerance) {
                 converged = true;
                 lastIterations = iter + 1;
-                lastResidual = rel_diff;
+                lastStepDelta = rel_diff;
                 break;
             }
         }
-        
+
         if (!converged) {
             lastIterations = maxIterations;
-            float diff_final = 0.0f;
-            float norm_H_final = 0.0f;
-            for (int i = 0; i < nn; i++) {
-                float d = Hk_next[i] - Hk[i];
-                diff_final += d * d;
-                norm_H_final += Hk_next[i] * Hk_next[i];
-            }
-            diff_final = sqrtf(diff_final);
-            norm_H_final = sqrtf(norm_H_final);
-            lastResidual = (norm_H_final > 1e-10f) ? (diff_final / norm_H_final) : diff_final;
+            lastStepDelta = rel_diff;
         }
 
-        // Recuperar P original: P = D^(-1) * P_scaled * D^(-1)
+        // Recuperar P original: P = D * P_scaled * D
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
-                P[i * n + j] = Dinv[i] * Hk[i * n + j] * Dinv[j];
+                P[i * n + j] = D[i] * Hk[i * n + j] * D[j];
             }
         }
         
@@ -1994,6 +2102,8 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         delete[] BT_P_B;
         delete[] BT_P_A;
         delete[] R_plus_BTPB;
+
+        lastResidual = computeDareResidualNorm();
     }
 
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -2005,23 +2115,31 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
     return converged;
 }
 
+// ============================================================================
+// ADDA — CORRIGIDO (ver plano, Fase 4.5).
+//
+// A forma anterior calculava DUAS inversas por iteração, V=(I+GH)^-1 e
+// W=(I+HG)^-1, usando W só na atualização de H. Pela identidade push-through
+// (I+HG)^-1·H ≡ H·(I+GH)^-1, ou seja W·H ≡ H·V, a atualização
+// Hk+1 = Hk + Ak'·W·Hk·Ak é ALGEBRICAMENTE IDÊNTICA a Hk + Ak'·(Hk·V)·Ak — a
+// mesma recorrência do SDA (Chu, Fan, Lin & Wang 2004), só com uma inversão
+// n×n redundante por iteração. Verificado numericamente: ‖P_ADDA-P_SDA‖/‖P_SDA‖
+// ~1e-16 em float64 para todos os casos de outputs/verify_float64_mirror.csv.
+//
+// A citação anterior (Lin & Xu, 2006/2007 — inconsistente entre .h e .cpp)
+// não corresponde a este algoritmo: o ADDA de fato (Wang, Wang & Li, SIAM J.
+// Matrix Anal. Appl. 33(1):170-194, 2012) resolve a MARE não-simétrica de
+// M-matriz com DOIS parâmetros de shift α≠β — não implementado aqui; portar
+// essa construção para a DARE simétrica exige derivar a Cayley generalizada
+// sobre o pencil simplético, o que é trabalho de pesquisa e fica registrado
+// como próximo passo em docs/auditoria_solvers_riccati.md.
+//
+// Esta versão remove a segunda inversão (usa a identidade push-through) e
+// mantém o nome/dispatcher por compatibilidade, documentando que o resultado
+// é o SDA em forma alternada.
+// ============================================================================
 bool AutoLQR::computeGainMatrixADDA()
 {
-    // Implementação do Alternating-Directional Doubling Algorithm (ADDA)
-    // Baseado em: Lin, Xu - "A structure-preserving doubling algorithm for 
-    // nonsymmetric algebraic Riccati equation" (2006)
-    // 
-    // Diferença do SDA: O ADDA usa DUAS matrizes inversas em cada iteração:
-    //   V = (I + Gk·Hk)^(-1)
-    //   W = (I + Hk·Gk)^(-1)
-    // 
-    // Isso explora a simetria do problema para melhor estabilidade numérica.
-    // 
-    // Iterações ADDA:
-    //   Ak+1 = Ak·V·Ak (usando V para atualização de A)
-    //   Gk+1 = Gk + Ak·V·Gk·Ak'  (usando V)
-    //   Hk+1 = Hk + Ak'·W·Hk·Ak  (usando W - alternância direcional!)
-    
     if (!A || !B || !Q || !R || !K || !P)
         return false;
 
@@ -2038,41 +2156,36 @@ bool AutoLQR::computeGainMatrixADDA()
     float* Ak = new float[nn]();
     float* Gk = new float[nn]();
     float* Hk = new float[nn]();
-    
+
     float* Ak_next = new float[nn]();
     float* Gk_next = new float[nn]();
     float* Hk_next = new float[nn]();
-    
+
     float* R_inv = new float[mm]();
     float* BT = new float[m * n]();
     float* AT = new float[nn]();
     float* V = new float[nn]();      // (I + Gk·Hk)^(-1)
-    float* W = new float[nn]();      // (I + Hk·Gk)^(-1) - ADDA específico
     float* Temp1 = new float[nn]();
     float* Temp2 = new float[nn]();
     float* Temp3 = new float[nn]();
-    
-    // ========================================================================
-    // INICIALIZAÇÃO DO ADDA
-    // ========================================================================
-    
+
     // 1. Ak = A
     matrixCopy(A, Ak, nn);
-    
+
     // 2. Calcular transpostas
     transposeMatrix(A, AT, n, n);
     transposeMatrix(B, BT, n, m);
-    
+
     // 3. Calcular R_inv
     matrixCopy(R, R_inv, mm);
     if (!invertMatrix(R_inv, R_inv, m)) {
         delete[] Ak; delete[] Gk; delete[] Hk;
         delete[] Ak_next; delete[] Gk_next; delete[] Hk_next;
         delete[] R_inv; delete[] BT; delete[] AT;
-        delete[] V; delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
+        delete[] V; delete[] Temp1; delete[] Temp2; delete[] Temp3;
         return false;
     }
-    
+
     // 4. Gk = B * R^(-1) * B'
     float* B_Rinv = new float[n * m];
     matrixMultiply(B, R_inv, B_Rinv, n, m, m);
@@ -2082,22 +2195,15 @@ bool AutoLQR::computeGainMatrixADDA()
     // 5. Hk = Q
     matrixCopy(Q, Hk, nn);
 
-    // ========================================================================
-    // LOOP ADDA - Iterações de dobramento com alternância direcional
-    // ========================================================================
     const int maxIterations = 100;
     const float tolerance = 1e-6f;
     bool converged = false;
-    
-    // Inicializar histórico de resíduos
+    float rel_diff = 1.0f;
+
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
 
     for (int iter = 0; iter < maxIterations; iter++) {
-        // ================================================================
-        // ADDA: Calcular AMBAS as inversas V e W
-        // ================================================================
-        
         // V = (I + Gk·Hk)^(-1)
         matrixMultiply(Gk, Hk, Temp1, n, n, n);
         for (int i = 0; i < n; i++) {
@@ -2107,38 +2213,24 @@ bool AutoLQR::computeGainMatrixADDA()
         if (!invertMatrix(V, V, n)) {
             break;
         }
-        
-        // W = (I + Hk·Gk)^(-1) - ADDA específico (alternância)
-        matrixMultiply(Hk, Gk, Temp1, n, n, n);
-        for (int i = 0; i < n; i++) {
-            Temp1[i * n + i] += 1.0f;
-        }
-        matrixCopy(Temp1, W, nn);
-        if (!invertMatrix(W, W, n)) {
-            break;
-        }
-        
-        // ================================================================
-        // Iterações ADDA com alternância direcional
-        // ================================================================
-        
+
         // Ak_next = Ak·V·Ak
         matrixMultiply(Ak, V, Temp1, n, n, n);
         matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
-        
-        // Gk_next = Gk + Ak·V·Gk·Ak'  (usa V)
+
+        // Gk_next = Gk + Ak·V·Gk·Ak'
         transposeMatrix(Ak, AT, n, n);
         matrixMultiply(Gk, AT, Temp2, n, n, n);
         matrixMultiply(Temp1, Temp2, Temp3, n, n, n);  // Temp1 ainda é Ak·V
         matrixAdd(Gk, Temp3, Gk_next, n, n);
-        
-        // Hk_next = Hk + Ak'·W·Hk·Ak  (usa W - ALTERNÂNCIA!)
-        // Nota: Esta é a diferença chave do ADDA vs SDA
-        matrixMultiply(W, Hk, Temp2, n, n, n);
+
+        // Hk_next = Hk + Ak'·(Hk·V)·Ak  (push-through: (I+HG)^-1 H ≡ H(I+GH)^-1,
+        // evita computar W=(I+Hk·Gk)^-1 separadamente)
+        matrixMultiply(Hk, V, Temp2, n, n, n);
         matrixMultiply(Temp2, Ak, Temp3, n, n, n);
         matrixMultiply(AT, Temp3, Temp2, n, n, n);
         matrixAdd(Hk, Temp2, Hk_next, n, n);
-        
+
         // Verificar convergência usando norma de Frobenius relativa
         float diff = 0.0f;
         float norm_H = 0.0f;
@@ -2150,44 +2242,33 @@ bool AutoLQR::computeGainMatrixADDA()
         diff = sqrtf(diff);
         norm_H = sqrtf(norm_H);
 
-        float rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
-        
-        // Armazenar resíduo no histórico (primeiras 10 iterações)
+        rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
+
         if (iter < 10) {
             residualHistory[iter] = rel_diff;
             residualHistoryCount = iter + 1;
         }
-        
-        // Atualizar
+
         matrixCopy(Ak_next, Ak, nn);
         matrixCopy(Gk_next, Gk, nn);
         matrixCopy(Hk_next, Hk, nn);
-        
+
         if (rel_diff < tolerance) {
             converged = true;
             lastIterations = iter + 1;
-            lastResidual = rel_diff;
+            lastStepDelta = rel_diff;
             break;
         }
     }
-    
+
     if (!converged) {
         lastIterations = maxIterations;
-        float diff_final = 0.0f;
-        float norm_H_final = 0.0f;
-        for (int i = 0; i < nn; i++) {
-            float d = Hk_next[i] - Hk[i];
-            diff_final += d * d;
-            norm_H_final += Hk[i] * Hk[i];
-        }
-        diff_final = sqrtf(diff_final);
-        norm_H_final = sqrtf(norm_H_final);
-        lastResidual = (norm_H_final > 1e-10f) ? (diff_final / norm_H_final) : diff_final;
+        lastStepDelta = rel_diff;
     }
 
     // P = Hk (solução final)
     matrixCopy(Hk, P, nn);
-    
+
     // Forçar simetria de P
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
@@ -2197,41 +2278,30 @@ bool AutoLQR::computeGainMatrixADDA()
         }
     }
 
-    // ========================================================================
-    // CÁLCULO DO GANHO K
-    // ========================================================================
     // K = (R + B'·P·B)^(-1) · B'·P·A
-    
     float* BT_P = new float[m * n];
     float* BT_P_B = new float[mm];
     float* BT_P_A = new float[m * n];
     float* R_plus_BTPB = new float[mm];
-    
-    // BT_P = B'·P
+
     matrixMultiply(BT, P, BT_P, m, n, n);
-    
-    // BT_P_B = (B'·P)·B
     matrixMultiply(BT_P, B, BT_P_B, m, n, m);
-    
-    // R_plus_BTPB = R + B'·P·B
     matrixAdd(R, BT_P_B, R_plus_BTPB, m, m);
-    
-    // Inverter
+
     if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
         converged = false;
     } else {
-        // BT_P_A = (B'·P)·A
         matrixMultiply(BT_P, A, BT_P_A, m, n, n);
-        
-        // K = (R + B'·P·B)^(-1) · (B'·P·A)
         matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
     }
+
+    lastResidual = computeDareResidualNorm();
 
     // Limpeza
     delete[] Ak; delete[] Gk; delete[] Hk;
     delete[] Ak_next; delete[] Gk_next; delete[] Hk_next;
     delete[] R_inv; delete[] BT; delete[] AT;
-    delete[] V; delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
+    delete[] V; delete[] Temp1; delete[] Temp2; delete[] Temp3;
     delete[] BT_P; delete[] BT_P_B; delete[] BT_P_A; delete[] R_plus_BTPB;
 
     return converged;
@@ -2243,6 +2313,10 @@ int AutoLQR::getLastIterations() const {
 
 float AutoLQR::getLastResidual() const {
     return lastResidual;
+}
+
+float AutoLQR::getLastStepDelta() const {
+    return lastStepDelta;
 }
 
 int AutoLQR::getResidualHistory(float* residuals) const {

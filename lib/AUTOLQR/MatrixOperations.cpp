@@ -397,26 +397,33 @@ IRAM_ATTR static bool invert_4x4_cofactor(const float* __restrict__ m, float* __
 
     float invdet = 1.0f / det;
 
-    inv[0]  = ( m[5] * c5 - m[6] * c4 + m[7] * c3) * invdet;
-    inv[1]  = (-m[1] * c5 + m[2] * c4 - m[3] * c3) * invdet;
-    inv[2]  = ( m[13] * s5 - m[14] * s4 + m[15] * s3) * invdet;
-    inv[3]  = (-m[9] * s5 + m[10] * s4 - m[11] * s3) * invdet;
+    // Buffer local: os chamadores de AutoLQR sempre fazem invertMatrix(X,X,n)
+    // in-place. Escrever direto em inv[] leria valores de m[] já sobrescritos
+    // (ex.: inv[5] precisa de m[0], mas inv[0] já teria sido gravado por cima
+    // quando inv==m) — por isso monta-se em t[] e copia-se para inv[] no final.
+    float t[16];
 
-    inv[4]  = (-m[4] * c5 + m[6] * c2 - m[7] * c1) * invdet;
-    inv[5]  = ( m[0] * c5 - m[2] * c2 + m[3] * c1) * invdet;
-    inv[6]  = (-m[12] * s5 + m[14] * s2 - m[15] * s1) * invdet;
-    inv[7]  = ( m[8] * s5 - m[10] * s2 + m[11] * s1) * invdet;
+    t[0]  = ( m[5] * c5 - m[6] * c4 + m[7] * c3) * invdet;
+    t[1]  = (-m[1] * c5 + m[2] * c4 - m[3] * c3) * invdet;
+    t[2]  = ( m[13] * s5 - m[14] * s4 + m[15] * s3) * invdet;
+    t[3]  = (-m[9] * s5 + m[10] * s4 - m[11] * s3) * invdet;
 
-    inv[8]  = ( m[4] * c4 - m[5] * c2 + m[7] * c0) * invdet;
-    inv[9]  = (-m[0] * c4 + m[1] * c2 - m[3] * c0) * invdet;
-    inv[10] = ( m[12] * s4 - m[13] * s2 + m[15] * s0) * invdet;
-    inv[11] = (-m[8] * s4 + m[9] * s2 - m[11] * s0) * invdet;
+    t[4]  = (-m[4] * c5 + m[6] * c2 - m[7] * c1) * invdet;
+    t[5]  = ( m[0] * c5 - m[2] * c2 + m[3] * c1) * invdet;
+    t[6]  = (-m[12] * s5 + m[14] * s2 - m[15] * s1) * invdet;
+    t[7]  = ( m[8] * s5 - m[10] * s2 + m[11] * s1) * invdet;
 
-    inv[12] = (-m[4] * c3 + m[5] * c1 - m[6] * c0) * invdet;
-    inv[13] = ( m[0] * c3 - m[1] * c1 + m[2] * c0) * invdet;
-    inv[14] = (-m[12] * s3 + m[13] * s1 - m[14] * s0) * invdet;
-    inv[15] = ( m[8] * s3 - m[9] * s1 + m[10] * s0) * invdet;
+    t[8]  = ( m[4] * c4 - m[5] * c2 + m[7] * c0) * invdet;
+    t[9]  = (-m[0] * c4 + m[1] * c2 - m[3] * c0) * invdet;
+    t[10] = ( m[12] * s4 - m[13] * s2 + m[15] * s0) * invdet;
+    t[11] = (-m[8] * s4 + m[9] * s2 - m[11] * s0) * invdet;
 
+    t[12] = (-m[4] * c3 + m[5] * c1 - m[6] * c0) * invdet;
+    t[13] = ( m[0] * c3 - m[1] * c1 + m[2] * c0) * invdet;
+    t[14] = (-m[12] * s3 + m[13] * s1 - m[14] * s0) * invdet;
+    t[15] = ( m[8] * s3 - m[9] * s1 + m[10] * s0) * invdet;
+
+    for (int i = 0; i < 16; i++) inv[i] = t[i];
     return true;
 }
 

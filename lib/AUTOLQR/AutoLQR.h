@@ -130,9 +130,18 @@ public:
 
     /**
      * @brief Get the final residual from last computation
-     * @return Final residual norm, or -1 if not available
+     * @return Norma do resíduo REAL da DARE, ‖A'PA-P-A'PB(R+B'PB)^-1B'PA+Q‖_F/‖Q‖_F,
+     *         calculada uma vez ao final do solver — não o critério interno de parada
+     *         (ver getLastStepDelta()). -1 se P/A/B/Q/R indisponíveis, -2 se R+B'PB singular.
      */
     float getLastResidual() const;
+
+    /**
+     * @brief Get the internal stopping-criterion delta from last computation
+     * @return ‖H_{k+1}-H_k‖_F/‖H_k‖_F da última iteração (critério interno de parada
+     *         de cada solver — NÃO é o resíduo da DARE, ver getLastResidual()).
+     */
+    float getLastStepDelta() const;
 
     /**
      * @brief Get residuals history for first iterations
@@ -153,38 +162,62 @@ private:
     float* R; ///< Control cost matrix
     float* K; ///< Control gain matrix
     float* state; ///< Current state
-    float* P; ///< Riccati equation solution
+    float* P; ///< Riccati equation solution (publicado por qualquer método, via getRicattiSolution)
+    float* P_warm; ///< Buffer de warm-start dedicado ao computeGainMatrixIterative() —
+                   ///< não compartilha estado com P, para não herdar a solução de outro método
     float* Kr; ///< Kr gain matrix
     float* reference; ///< To store reference values
     
     int lastIterations; ///< Number of iterations in last computation
-    float lastResidual; ///< Final residual norm from last computation
+    float lastResidual; ///< Resíduo REAL da DARE (ver getLastResidual())
+    float lastStepDelta; ///< Critério interno de parada da última iteração (ver getLastStepDelta())
     float residualHistory[10]; ///< Residuals for first 10 iterations
     int residualHistoryCount; ///< Number of valid entries in residualHistory
 
     /**
-     * @brief Compute the optimal gain matrix by solving DARE (iterative method)
-     * @return true if successful, false otherwise
+     * @brief Resíduo real da DARE para o (A,B,Q,R,P) atuais
+     * @return ‖A'PA-P-A'PB(R+B'PB)^-1B'PA+Q‖_F/‖Q‖_F; -1 se dados indisponíveis,
+     *         -2 se R+B'PB for singular.
+     * @note Chamado uma vez ao final de cada computeGainMatrixXXX() bem-sucedido,
+     *       para preencher lastResidual com uma métrica auditável (ver
+     *       docs/auditoria_solvers_riccati.md) — o critério interno ‖ΔH‖/‖H‖ usado
+     *       para decidir a parada de cada solver fica em lastStepDelta.
      */
-    bool computeGainMatrix();
-    
+    float computeDareResidualNorm() const;
+
+
     /**
-     * @brief Compute the optimal gain matrix using Schur method (QZ decomposition)
-     * Solves DARE using generalized Schur decomposition for direct solution
+     * @brief Decomposição de Schur do pencil simplético (direto, não iterativo).
+     * Usa Eigen::ComplexSchur **sem reordenação** — a seleção de colunas do
+     * subespaço estável por índice diagonal não garante base do subespaço
+     * invariante correto (defeito conhecido, não corrigido nesta auditoria —
+     * ver docs/auditoria_solvers_riccati.md). Órfão: nenhum chamador no
+     * repositório.
+     * Referência: Laub, A.J. "A Schur Method for Solving Algebraic Riccati
+     * Equations." IEEE Trans. Automat. Control 24(6):913-921, 1979.
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixSchur();
 
     /**
-     * @brief Compute the optimal gain matrix using Van Dooren's method
-     * Solves DARE using Van Dooren's algorithm for numerical stability
+     * @brief Método direto via pencil estendido (2n+m)×(2n+m) com deflação QR
+     * e autoproblema generalizado — evita inverter R mesmo se singular.
+     * Referência: Van Dooren, P. "A Generalized Eigenvalue Approach for
+     * Solving Riccati Equations." SIAM J. Sci. Stat. Comput. 2(2):121-135,
+     * 1981 (Problema II, DARE discreta).
      * @return true if successful, false otherwise
-     */    
+     */
     bool computeGainMatrixVanDooren();
 
     /**
-     * @brief Compute the optimal gain matrix using SDA method
-     * Solves DARE using State-dependent Riccati Equation for adaptive control
+     * @brief Structure-preserving Doubling Algorithm (SDA) — referência exata
+     * em float, convergência quadrática (~8-10 iterações em regime).
+     * Referência: Chu, E.K.-W., Fan, H.-Y., Lin, W.-W., Wang, C.-S.
+     * "Structure-preserving algorithms for periodic discrete-time algebraic
+     * Riccati equations." Int. J. Control 77(8):767-788, 2004 (box "SDA
+     * algorithm", p.770). Origem: Anderson, B.D.O. "Second-order convergent
+     * algorithms for the steady-state Riccati equation." IEEE CDC, 1978
+     * (eqs. 4a-4c).
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixSDA();
@@ -194,45 +227,73 @@ private:
      * Resolve a DARE em int32 (~2.7× mais rápido que float, erro do K < 1%).
      * Validado só para o caso 6 estados / 3 controles. Retorna false em
      * overflow/saturação ou matriz singular → o chamador faz fallback p/ o SDA float.
+     * Mesma recorrência de computeGainMatrixSDA() (mesma referência), só a
+     * aritmética (fixed-point Q13.18) é escolha de engenharia deste projeto.
      * @return true se sucesso, false se deve cair no fallback float
      */
     bool computeGainMatrixSDA_Fixed();
 
     /**
-     * @brief Compute the optimal gain matrix using Iterative method
-     * Solves DARE using basic iterative approach for simplicity
+     * @brief Iteração de ponto-fixo direta na DARE (value iteration clássica),
+     * P_{k+1}=Q+A'P_kA-A'P_kB(R+B'P_kB)^-1B'P_kA, com warm-start dedicado
+     * (P_warm) e regularização diagonal 1e-8 em (R+B'PB). Convergência
+     * **linear** (não quadrática como o SDA) — não está em nenhum dos 8
+     * papers de SOLVERS/, é a iteração elementar descrita em, e.g.,
+     * Lancaster, P., Rodman, L. "The Algebraic Riccati Equation." Oxford
+     * University Press, 1995 (cap. 2).
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixIterative();
     
     /**
-     * @brief Compute the optimal gain matrix using SDA with Single Shift (SDA-ss)
-     * Enhanced SDA with shift parameter for better convergence when eigenvalues near 1
-     * Reference: "Structure-preserving algorithms for periodic discrete-time algebraic Riccati equations"
+     * @brief SDA com shift real único γ, deslocando o pencil simplético inteiro
+     * (não só A) para preservar P — ver comentário de implementação em AutoLQR.cpp
+     * para a derivação e a correção do bug da versão anterior (shift em A
+     * isolado, que resolvia uma DARE diferente da original).
+     * Referência: Chu, Fan, Lin & Wang, "Structure-preserving algorithms for
+     * periodic discrete-time algebraic Riccati equations", Int. J. Control
+     * 77(8):767-788, 2004 (técnica de shift generalizada em Chu, Fan & Lin,
+     * Linear Algebra Appl. 396:55-80, 2005).
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixSDA_SS();
-    
+
     /**
-     * @brief Compute the optimal gain matrix using Adaptive SDA (ASDA)
-     * Adaptive scaling during iterations for improved numerical stability
+     * @brief SDA com escalonamento adaptativo (G,H)->(sG,H/s) a cada iteração,
+     * revertido no final via P = H_k·∏s_i — ver comentário de implementação em
+     * AutoLQR.cpp para a correção do bug da versão anterior (não revertia o
+     * produto acumulado).
+     * Referência: Chu, E.K.-W., Fan, H.-Y., Lin, W.-W. "A structure-preserving
+     * doubling algorithm for continuous-time algebraic Riccati equations."
+     * Linear Algebra Appl. 396:55-80, 2005 (mesmo paper de computeGainMatrixSDA_SS()
+     * — cobre tanto o shift γ quanto a técnica de escalonamento adaptativo para
+     * robustez numérica do SDA). Conteúdo integral do paper não verificado
+     * diretamente por mim (acesso ao texto completo bloqueado nas fontes
+     * consultadas); citação confirmada pelo usuário.
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixASDA();
-    
+
     /**
-     * @brief Compute the optimal gain matrix using Scaled SDA
-     * Uses optimal scaling for better conditioning of Hamiltonian pencil
+     * @brief SDA com balanceamento diagonal D do pencil simplético (Â=DAD⁻¹,
+     * Ĝ=DGD, Ĥ=D⁻¹QD⁻¹, P=D·P̂·D) — ver comentário de implementação em
+     * AutoLQR.cpp para a correção dos expoentes de D da versão anterior.
+     * Referência: Ward, "Balancing the Generalized Eigenvalue Problem", SIAM
+     * J. Sci. Stat. Comput. 2(2):141-152, 1981.
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixSDA_Scaled();
-    
+
     /**
-     * @brief Compute the optimal gain matrix using ADDA (Alternating-Directional Doubling Algorithm)
-     * Variant of SDA that alternates multiplication order between iterations
-     * for improved numerical stability on certain problems
-     * Reference: Lin, Xu, "On the Doubling Algorithm for a (Shifted) Nonsymmetric
-     *            Algebraic Riccati Equation", 2007
+     * @brief SDA em forma alternada (calcula V=(I+GH)^-1 e usa a identidade
+     * push-through (I+HG)^-1 H ≡ H(I+GH)^-1 para a atualização de H). Mantido
+     * pelo nome "ADDA" por compatibilidade com o dispatcher, mas é
+     * algebricamente idêntico ao SDA — ver comentário de implementação em
+     * AutoLQR.cpp. O ADDA de fato (dois parâmetros de shift α≠β sobre a MARE
+     * não-simétrica de M-matriz) não está implementado.
+     * Referência correta: Wang, Wang & Li, "Alternating-Directional Doubling
+     * Algorithm for M-Matrix Algebraic Riccati Equations", SIAM J. Matrix
+     * Anal. Appl. 33(1):170-194, 2012.
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixADDA();
