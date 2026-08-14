@@ -297,6 +297,62 @@ private:
      * @return true if successful, false otherwise
      */
     bool computeGainMatrixADDA();
+
+    // ------------------------------------------------------------------
+    // Variantes em fixed-point Q13.18 (ESP32-S2 sem FPU), via o kernel
+    // compartilhado em FixedPointQ.{h,cpp}. Mesmo gate n==6,m==3 e mesma
+    // convenção de fallback do SDA_FIXED (retornam false em overflow/
+    // saturação ou matriz singular; sem fallback automático para float).
+    // Referências bibliográficas: as mesmas do par float correspondente
+    // (ver docs/auditoria_solvers_riccati.md) — a aritmética Q13.18 em si
+    // é engenharia própria deste projeto, sem paper específico.
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief SDA_SS em fixed-point. Setup do pencil 12×12 no mesmo shift
+     * Q13.18 do resto — a faixa limitante é Φ=N1⁻¹, não N1, e seu tamanho
+     * varia demais entre casos (mediana ~738, até ~46000 em cenários
+     * adversariais) para um shift único cobrir tudo sem perder resolução
+     * onde importa; Q13.18 cobre a esmagadora maioria dos casos reais (ver
+     * comentário de implementação e docs/auditoria_solvers_riccati.md).
+     * @return true se sucesso, false se deve cair no fallback float
+     */
+    bool computeGainMatrixSDA_SS_Fixed();
+
+    /**
+     * @brief ASDA em fixed-point. Reescalonamento (G,H)->(sG,H/s) por
+     * iteração; a norma e o fator de escala são calculados em float (poucas
+     * chamadas de sqrtf, desprezível frente às matmuls), os dados de
+     * A/G/H permanecem inteiros o tempo todo.
+     * @return true se sucesso, false se deve cair no fallback float
+     */
+    bool computeGainMatrixASDA_Fixed();
+
+    /**
+     * @brief SDA_SCALED em fixed-point. Balanceamento diagonal D por normas
+     * de linha de A, calculado em Q13.18 (setup barato: D é diagonal).
+     * @return true se sucesso, false se deve cair no fallback float
+     */
+    bool computeGainMatrixSDA_Scaled_Fixed();
+
+    /**
+     * @brief ADDA em fixed-point na forma V/W com duas inversões separadas
+     * (mantida deliberadamente, ao contrário do par float que já usa só V
+     * via push-through) — mede se a ordem de multiplicação W·H vs. H·V
+     * quantiza diferente em Q13.18.
+     * @return true se sucesso, false se deve cair no fallback float
+     */
+    bool computeGainMatrixADDA_Fixed();
+
+    /**
+     * @brief Iterativo (value iteration) em fixed-point. Convergência linear
+     * — já não converge em 100 iterações float para boa parte dos casos da
+     * bateria. Compartilha o warm-start (P_warm, float) com
+     * computeGainMatrixIterative() — mesmo P físico, aritmética diferente;
+     * chamadas sucessivas (float ou fixed) partem do resultado da anterior.
+     * @return true se sucesso, false se deve cair no fallback float
+     */
+    bool computeGainMatrixIterative_Fixed();
 };
 
 #endif

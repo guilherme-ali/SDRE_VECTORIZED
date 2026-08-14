@@ -6,9 +6,10 @@ Biblioteca otimizada para cálculo de ganhos LQR em tempo real, projetada para s
 
 - **Caminho de produção `SDA_FIXED`** (fixed-point Q13.18) — default de `computeGains()`, derivado do SDA base
 - **8 métodos de solução DARE em `float`** (SDA, SDA-ss, ASDA, SDA Scaled, ADDA, Schur, Van Dooren, Iterativo) — Schur não tem chamador no repositório (órfão)
+- **6 variantes fixed-point Q13.18** (SDA, SDA-ss, ASDA, SDA Scaled, ADDA, Iterativo — Schur e Van Dooren ficam só em `float`), kernel compartilhado em `FixedPointQ.{h,cpp}`, todas 1,5-1,85× mais rápidas que o par `float` no ESP32-S2 real
 - **Operações matriciais otimizadas** para sistemas de pequeno/médio porte (`MatrixOperations`)
 - **Warm-start** automático para o método iterativo (buffer dedicado, não compartilhado com os demais métodos)
-- Cada solver aloca seus buffers de trabalho por chamada (`new[]`/`delete[]`); só `SDA_FIXED` é alloc-free (stack)
+- Cada solver aloca seus buffers de trabalho por chamada (`new[]`/`delete[]`); os métodos fixed-point usam só stack
 
 ## 🔧 Métodos Disponíveis
 
@@ -341,6 +342,52 @@ economizando ~42 % nessas matmuls. **Válido apenas quando o chamador garante a 
 > de referência exata e *fallback* manual. O caminho de produção atual (`"SDA_FIXED"`, fixed-point
 > Q13.18, default de `computeGains()`) roda em ~3,2 ms.
 
+### 3. Fixed-point para os demais métodos de doubling
+
+`"SDA_SS_FIXED"`, `"ASDA_FIXED"`, `"SDA_SCALED_FIXED"`, `"ADDA_FIXED"` e `"ITERATIVE_FIXED"` levam
+a mesma ideia do `SDA_FIXED` aos outros cinco métodos (exceto Schur e Van Dooren, que ficam só em
+`float`). O kernel Q13.18 foi extraído para `FixedPointQ.{h,cpp}` — um único laço de duplicação
+compartilhado (`fxq::doubling_loop_q`), parametrizado por `Variant` (`Standard`, `AdaptiveScaling`
+para o ASDA, `AlternatingVW` para o ADDA), já que os quatro métodos de doubling só diferem em como
+montam `(A₀,G₀,H₀)` e extraem `P` — o laço em si é idêntico. `ITERATIVE_FIXED` tem recorrência
+própria (não usa o laço de duplicação).
+
+Medido no ESP32-S2 físico (caso de hover real, `test/verify_gains_onboard.cpp`):
+
+| Método | tempo float | tempo fixed | *speedup* | resíduo DARE (fixed) |
+|---|---|---|---|---|
+| `SDA_FIXED` (referência) | 7,76 ms | **4,44 ms** | 1,75× | 6,34×10⁻³ |
+| `SDA_SS_FIXED` | 7,99 ms | **4,45 ms** | 1,80× | **4,03×10⁻³** (melhor que o SDA_FIXED) |
+| `ASDA_FIXED` | 9,00 ms | 4,98 ms | 1,81× | 4,81×10⁻³ |
+| `SDA_SCALED_FIXED` | 8,50 ms | 4,59 ms | 1,85× | 9,14×10⁻³ |
+| `ADDA_FIXED` | 8,39 ms | 5,57 ms | 1,51× | 7,61×10⁻³ |
+| `ITERATIVE_FIXED` (100 iter.) | 32,6 ms | 19,3 ms | 1,69× | 5,80×10⁻² (≈ igual ao float, 5,82×10⁻²) |
+
+Achados:
+- **Todas as variantes ganham entre 1,5× e 1,85×** sobre o par `float` correspondente no S2 real —
+  o ganho do fixed-point não é exclusividade do SDA base.
+- **`SDA_SS_FIXED` é o mais preciso *e* praticamente tão rápido quanto o `SDA_FIXED`** (4,45 ms vs.
+  4,44 ms): o custo do setup do pencil 12×12 é amortizado por precisar de menos iterações do laço
+  (8 vs. 10). O shift γ parece ajudar tanto a convergência quanto o comportamento sob quantização.
+- **`ASDA_FIXED` vem em segundo** em precisão — o escalonamento adaptativo `(G,H)→(sG,H/s)` limita
+  o crescimento de `‖G‖`, que é o que mais aproxima a faixa Q13.18 do teto (pico histórico
+  `maxGk≈2980` contra ±8192, margem de só 2,7×).
+- **`ADDA_FIXED` mantém deliberadamente as duas inversões** (`V` e `W` separadas, ao contrário do
+  par `float` que já usa só `V` via push-through) — é o mais lento dos cinco por isso, mas serve
+  para medir se a ordem de multiplicação `W·H` vs. `H·V` quantiza diferente (resultado: sim, dá um
+  resíduo um pouco diferente do SDA_FIXED, mas não dramaticamente).
+- **`ITERATIVE_FIXED` prova que a quantização não é o gargalo ali**: com o mesmo orçamento de 100
+  iterações do `float`, o resíduo final é essencialmente igual (5,80×10⁻² vs. 5,82×10⁻²) — é a
+  **convergência linear** que não dá conta em 100 iterações para estes sistemas rígidos, tanto em
+  `float` quanto em fixed-point, não um efeito de precisão numérica.
+- **Setup do `SDA_SS_FIXED`**: o pencil 12×12 (`N1=[[I-γA,-γG₀],[γQ,I-γA']]`, invertido para obter
+  `Φ`) usa o **mesmo shift Q13.18** do resto — uma primeira tentativa em Q9.22 (mais resolução para
+  as entradas de `N1`, que somam só ~200-700 de magnitude) **falhou em quase todos os casos**: o que
+  limita a faixa não é `N1`, é `Φ=N1⁻¹`, cuja magnitude varia muito mais entre casos (mediana ~738,
+  até ~46000 em cenários adversariais de escala) — nenhum shift fixo cobre as duas pontas. Q13.18
+  cobre 224 dos 225 casos testados (falha só o caso deliberadamente adversarial de disparidade de
+  escala 1000×) — ver `docs/auditoria_solvers_riccati.md`.
+
 ## 🔬 Detalhes de Implementação
 
 ### Equação DARE Resolvida
@@ -363,6 +410,7 @@ onde $K_r$ é o ganho de referência para tracking.
 AUTOLQR/
 ├── AutoLQR.cpp / .h            # Classe principal (estende MatrixOperations)
 ├── MatrixOperations.cpp / .h   # Operações lineares (inv, mul, transp, QR, etc.)
+├── FixedPointQ.cpp / .h        # Kernel Q13.18 compartilhado (laço de duplicação + primitivas)
 └── README.md                   # Esta documentação
 ```
 

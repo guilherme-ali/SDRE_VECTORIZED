@@ -1,161 +1,10 @@
 #include "AutoLQR.h"
+#include "FixedPointQ.h"
 #include <math.h>
 #include <ArduinoEigen.h>
 #include <string.h>  // Para strcmp
 #include <algorithm> // Para std::sort
 #include <stdint.h>
-
-// ============================================================================
-// SDA em fixed-point Q13.18 (int32) — caminho rápido para ESP32-S2 sem FPU.
-// Validado end-to-end: erro do K < 1% vs float, ~2.7× mais rápido, erro é
-// puramente quantização (não amplifica com κ). Range ±8192 dá margem 2.7×
-// sobre o pico observado (maxGk≈2980, estado-dependente no SDRE).
-// A flag g_q_ovf sinaliza saturação → o chamador faz fallback para o SDA float.
-// ============================================================================
-namespace {
-typedef int32_t q16_t;
-static const int Q_SHIFT = 18;     // Q13.18: 13 bits inteiros (±8192), 18 fracionários (res 3.8e-6)
-static bool g_q_ovf = false;       // overflow/saturação detectado no run atual
-static int  g_q_iters = 0;         // nº de iterações do último sda_q (telemetria)
-
-// Conversões parametrizadas pelo nº de bits fracionários (sh)
-static inline q16_t f2q(float x, int sh) {
-    double v = (double)x * (double)(1u << sh);
-    if (v >  2147483647.0) { g_q_ovf = true; return INT32_MAX; }
-    if (v < -2147483648.0) { g_q_ovf = true; return INT32_MIN; }
-    return (q16_t)llround(v);
-}
-static inline float q2f(q16_t x, int sh) { return (float)x / (float)(1u << sh); }
-
-static inline q16_t qmul(q16_t a, q16_t b, int sh) {
-    int64_t r = ((int64_t)a * (int64_t)b) >> sh;
-    if (r > INT32_MAX) { g_q_ovf = true; return INT32_MAX; }
-    if (r < INT32_MIN) { g_q_ovf = true; return INT32_MIN; }
-    return (q16_t)r;
-}
-static inline q16_t qdiv(q16_t a, q16_t b, int sh) {
-    if (b == 0) { g_q_ovf = true; return (a >= 0) ? INT32_MAX : INT32_MIN; }
-    int64_t r = ((int64_t)a << sh) / b;     // estoura se b minúsculo → clamp + flag
-    if (r > INT32_MAX) { g_q_ovf = true; return INT32_MAX; }
-    if (r < INT32_MIN) { g_q_ovf = true; return INT32_MIN; }
-    return (q16_t)r;
-}
-static void matmul_q(const q16_t* a, const q16_t* b, q16_t* c, int r1, int c1, int c2, int sh) {
-    for (int i = 0; i < r1; i++)
-        for (int j = 0; j < c2; j++) {
-            int64_t acc = 0;
-            for (int k = 0; k < c1; k++) acc += (int64_t)a[i * c1 + k] * (int64_t)b[k * c2 + j];
-            int64_t r = acc >> sh;
-            if (r > INT32_MAX)      { g_q_ovf = true; r = INT32_MAX; }
-            else if (r < INT32_MIN) { g_q_ovf = true; r = INT32_MIN; }
-            c[i * c2 + j] = (q16_t)r;
-        }
-}
-static void transpose_q(const q16_t* a, q16_t* at, int r, int c) {
-    for (int i = 0; i < r; i++)
-        for (int j = 0; j < c; j++) at[j * r + i] = a[i * c + j];
-}
-static void add_q(const q16_t* a, const q16_t* b, q16_t* c, int n) {
-    for (int i = 0; i < n; i++) c[i] = a[i] + b[i];
-}
-// Inversão Gauss-Jordan fixed-point parametrizada pelo shift
-static bool invert_q(const q16_t* src, q16_t* dst, int n, int sh) {
-    // Buffer na stack (não static) — sda_q()/invert_q() rodam em uma task
-    // FreeRTOS dedicada (ver src/main.cpp), mas um buffer static tornaria a
-    // função não-reentrante se algum dia houver mais de uma chamada concorrente.
-    q16_t aug[6 * 12];
-    const int n2 = 2 * n;
-    const q16_t one = f2q(1.0f, sh);
-    const q16_t pivot_floor = f2q(1e-4f, sh);   // piso > resolução fixed-point
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) aug[i * n2 + j] = src[i * n + j];
-        for (int j = 0; j < n; j++) aug[i * n2 + n + j] = (i == j) ? one : 0;
-    }
-    for (int i = 0; i < n; i++) {
-        q16_t maxv = aug[i * n2 + i]; if (maxv < 0) maxv = -maxv;
-        int mr = i;
-        for (int k = i + 1; k < n; k++) {
-            q16_t v = aug[k * n2 + i]; if (v < 0) v = -v;
-            if (v > maxv) { maxv = v; mr = k; }
-        }
-        if (maxv < pivot_floor) return false;   // ~singular no domínio fixed-point
-        if (mr != i)
-            for (int j = 0; j < n2; j++) { q16_t t = aug[i * n2 + j]; aug[i * n2 + j] = aug[mr * n2 + j]; aug[mr * n2 + j] = t; }
-        q16_t piv = aug[i * n2 + i];
-        for (int j = 0; j < n2; j++) aug[i * n2 + j] = qdiv(aug[i * n2 + j], piv, sh);
-        for (int k = 0; k < n; k++)
-            if (k != i) {
-                q16_t f = aug[k * n2 + i];
-                if (f != 0)
-                    for (int j = 0; j < n2; j++) aug[k * n2 + j] -= qmul(f, aug[i * n2 + j], sh);
-            }
-    }
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < n; j++) dst[i * n + j] = aug[i * n2 + n + j];
-    return true;
-}
-// SDA completo em fixed-point. Converge internamente (critério análogo ao float,
-// tolerância relaxada p/ o piso de quantização). Retorna false em singular/overflow.
-// Pout/Kout recebem P e K na representação fixed-point do shift sh.
-static bool sda_q(const q16_t* A, const q16_t* B, const q16_t* Q, const q16_t* R,
-                  q16_t* Kout, q16_t* Pout, int n, int m, int sh) {
-    // Buffers na stack (não static) — mesma razão do invert_q() acima.
-    q16_t Ak[36], Gk[36], Hk[36], Akn[36], Gkn[36], Hkn[36];
-    q16_t Rinv[9], BT[18], AT[36], W[36], T1[36], T2[36], T3[36], BRi[18];
-    q16_t BTP[18], BTPB[9], Rp[9], BTPA[18];
-    const int nn = n * n;
-    const q16_t one = f2q(1.0f, sh);
-    const int maxIter = 25;
-    g_q_iters = maxIter;
-
-    memcpy(Ak, A, nn * sizeof(q16_t));
-    transpose_q(B, BT, n, m);
-    if (!invert_q(R, Rinv, m, sh)) return false;
-    matmul_q(B, Rinv, BRi, n, m, m, sh);
-    matmul_q(BRi, BT, Gk, n, m, n, sh);
-    memcpy(Hk, Q, nn * sizeof(q16_t));
-
-    for (int it = 0; it < maxIter; it++) {
-        matmul_q(Gk, Hk, T1, n, n, n, sh);
-        for (int i = 0; i < n; i++) T1[i * n + i] += one;
-        if (!invert_q(T1, W, n, sh)) return false;
-        matmul_q(Ak, W, T1, n, n, n, sh);     // T1 = Ak·W
-        matmul_q(T1, Ak, Akn, n, n, n, sh);
-        transpose_q(Ak, AT, n, n);
-        matmul_q(Gk, AT, T2, n, n, n, sh);
-        matmul_q(T1, T2, T3, n, n, n, sh);
-        add_q(Gk, T3, Gkn, nn);
-        matmul_q(W, Ak, T2, n, n, n, sh);
-        matmul_q(Hk, T2, T3, n, n, n, sh);
-        matmul_q(AT, T3, T2, n, n, n, sh);
-        add_q(Hk, T2, Hkn, nn);
-
-        // Convergência: max|ΔHk| / max|Hk| < 1e-3 (piso fixed-point ~3.8e-6)
-        q16_t dmax = 0, hmax = 0;
-        for (int i = 0; i < nn; i++) {
-            q16_t d = Hkn[i] - Hk[i]; if (d < 0) d = -d;
-            q16_t h = Hk[i];          if (h < 0) h = -h;
-            if (d > dmax) dmax = d;
-            if (h > hmax) hmax = h;
-        }
-        memcpy(Ak, Akn, nn * sizeof(q16_t));
-        memcpy(Gk, Gkn, nn * sizeof(q16_t));
-        memcpy(Hk, Hkn, nn * sizeof(q16_t));
-        if ((int64_t)dmax * 1000 < (int64_t)hmax) { g_q_iters = it + 1; break; }   // convergiu
-    }
-    if (Pout) memcpy(Pout, Hk, nn * sizeof(q16_t));   // P = Hk
-
-    // K = (R + B'·P·B)^-1 · B'·P·A
-    matmul_q(BT, Hk, BTP, m, n, n, sh);
-    matmul_q(BTP, B, BTPB, m, n, m, sh);
-    add_q(R, BTPB, Rp, m * m);
-    if (!invert_q(Rp, Rp, m, sh)) return false;
-    matmul_q(BTP, A, BTPA, m, n, n, sh);
-    matmul_q(Rp, BTPA, Kout, m, m, n, sh);
-    return true;
-}
-} // namespace
-// ============================================================================
 
 AutoLQR::AutoLQR(int stateSize, int controlSize)
     : stateSize(stateSize)
@@ -262,6 +111,16 @@ bool AutoLQR::computeGains(const char* method)
         K_flag = computeGainMatrixIterative();
     } else if (strcmp(method, "ADDA") == 0) {
         K_flag = computeGainMatrixADDA();
+    } else if (strcmp(method, "SDA_SS_FIXED") == 0) {
+        K_flag = computeGainMatrixSDA_SS_Fixed();
+    } else if (strcmp(method, "ASDA_FIXED") == 0) {
+        K_flag = computeGainMatrixASDA_Fixed();
+    } else if (strcmp(method, "SDA_SCALED_FIXED") == 0) {
+        K_flag = computeGainMatrixSDA_Scaled_Fixed();
+    } else if (strcmp(method, "ADDA_FIXED") == 0) {
+        K_flag = computeGainMatrixADDA_Fixed();
+    } else if (strcmp(method, "ITERATIVE_FIXED") == 0) {
+        K_flag = computeGainMatrixIterative_Fixed();
     } else {
         // Método desconhecido: cai no default de computeGains(), SDA_FIXED
         Serial.print(F("Método desconhecido: "));
@@ -334,8 +193,12 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
 {
     // Caminho rápido do SDA em fixed-point Q13.18 (ESP32-S2 sem FPU).
     // Retorna false → chamador faz fallback p/ o SDA float quando há
-    // overflow/saturação (g_q_ovf) ou matriz singular no domínio fixed-point.
+    // overflow/saturação ou matriz singular no domínio fixed-point.
+    // Setup + laço + extração equivalentes ao computeGainMatrixSDA() float,
+    // usando o kernel compartilhado em FixedPointQ (ver docs/auditoria_solvers_riccati.md).
+    using namespace fxq;
     const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
 
     if (!A || !B || !Q || !R || !K)
         return false;
@@ -344,23 +207,41 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     if (!isSystemControllable())
         return false;
 
-    q16_t Aq[36], Bq[18], Qq[36], Rq[9], Kq[18], Pq[36];   // stack (one-shot por chamada)
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];   // stack (one-shot por chamada)
 
-    g_q_ovf = false;
-    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], Q_SHIFT); Qq[i] = f2q(Q[i], Q_SHIFT); }
-    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], Q_SHIFT);
-    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], Q_SHIFT);
-    if (g_q_ovf) return false;     // entrada já fora do range ±8192 → fallback
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;     // entrada já fora do range ±8192 → fallback
 
-    if (!sda_q(Aq, Bq, Qq, Rq, Kq, Pq, n, m, Q_SHIFT))
+    q_t BT[18], Rinv[9], BRi[18], Gk[36], Hk[36], Ak[36];
+    transpose_q(Bq, BT, n, m);
+    if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+    matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
+    matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
+    memcpy(Hk, Qq, sizeof(Hk));
+    memcpy(Ak, Aq, sizeof(Ak));
+
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
         return false;              // singular no domínio fixed-point → fallback
-    if (g_q_ovf) return false;     // saturou durante o SDA → fallback
+    if (st.overflow) return false; // saturou durante o laço → fallback
 
-    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], Q_SHIFT);
-    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], Q_SHIFT);
+    // K = (R + B'PB)^-1 B'PA, com A ORIGINAL (Aq), não Ak (mutado pelo laço)
+    q_t BTP[18], BTPB[9], Rp[9], BTPA[18], Kq[18];
+    matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
+    matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
+    add_q(Rq, BTPB, Rp, m * m);
+    if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+    matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
+    matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
+    if (st.overflow) return false;
 
-    lastIterations = g_q_iters;
-    residualHistoryCount = 0; // sda_q() não expõe resíduo por iteração (kernel fixed-point)
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
+
+    lastIterations = st.iterations;
+    residualHistoryCount = 0; // kernel fixed-point não expõe resíduo por iteração
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     lastResidual = computeDareResidualNorm(); // resíduo real da DARE, calculado em float32
     return true;
@@ -2305,6 +2186,471 @@ bool AutoLQR::computeGainMatrixADDA()
     delete[] BT_P; delete[] BT_P_B; delete[] BT_P_A; delete[] R_plus_BTPB;
 
     return converged;
+}
+
+// ============================================================================
+// Variantes fixed-point Q13.18 dos métodos de doubling — ver plano da
+// auditoria e docs/auditoria_solvers_riccati.md. Setup/extração de cada uma
+// mimetiza o par float correspondente (comentários lá têm a derivação
+// completa); aqui só a aritmética muda. Mesmo gate n==6,m==3 e mesma
+// convenção de fallback do SDA_FIXED original.
+// ============================================================================
+
+bool AutoLQR::computeGainMatrixADDA_Fixed()
+{
+    // Forma V/W com duas inversões (ao contrário do par float, que já usa só
+    // V via push-through) — mantida deliberadamente para medir se a ordem de
+    // multiplicação W·H vs. H·V quantiza diferente em Q13.18.
+    using namespace fxq;
+    const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
+
+    if (!A || !B || !Q || !R || !K) return false;
+    if (n != 6 || m != 3) return false;
+    if (!isSystemControllable()) return false;
+
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;
+
+    q_t BT[18], Gk[36], Hk[36], Ak[36];
+    transpose_q(Bq, BT, n, m);
+    {
+        q_t Rinv[9], BRi[18];
+        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
+        matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
+    }
+    memcpy(Hk, Qq, sizeof(Hk));
+    memcpy(Ak, Aq, sizeof(Ak));
+    if (st.overflow) return false;
+
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AlternatingVW, 25, 1000, nullptr, &st))
+        return false;
+    if (st.overflow) return false;
+
+    q_t Kq[18];
+    {
+        q_t BTP[18], BTPB[9], Rp[9], BTPA[18];
+        matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
+        matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
+        add_q(Rq, BTPB, Rp, m * m);
+        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
+        matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
+
+    lastIterations = st.iterations;
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm();
+    return true;
+}
+
+bool AutoLQR::computeGainMatrixASDA_Fixed()
+{
+    using namespace fxq;
+    const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
+
+    if (!A || !B || !Q || !R || !K) return false;
+    if (n != 6 || m != 3) return false;
+    if (!isSystemControllable()) return false;
+
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;
+
+    q_t BT[18], Gk[36], Hk[36], Ak[36];
+    transpose_q(Bq, BT, n, m);
+    {
+        q_t Rinv[9], BRi[18];
+        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
+        matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
+    }
+    memcpy(Hk, Qq, sizeof(Hk));
+    memcpy(Ak, Aq, sizeof(Ak));
+    if (st.overflow) return false;
+
+    // Rescale (G,H)->(sG,H/s) acontece a cada iteração dentro do laço
+    // (inclusive a primeira — equivalente ao s0 inicial + iteração 0
+    // redundante do par float, ver docs/auditoria_solvers_riccati.md).
+    float cum_s = 1.0f;
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AdaptiveScaling, 25, 1000, &cum_s, &st))
+        return false;
+    if (st.overflow) return false;
+
+    // P = H_final * cum_s — desfeito fora do laço em float (cum_s é produto
+    // de ~10 fatores em [0,1;10], não cabe garantido em Q13.18) — depois
+    // requantizado para terminar o cálculo de K em fixed-point.
+    q_t Pq[36];
+    for (int i = 0; i < n * n; i++) {
+        float pf = q2f(Hk[i], sh) * cum_s;
+        Pq[i] = f2q(pf, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    q_t Kq[18];
+    {
+        q_t BTP[18], BTPB[9], Rp[9], BTPA[18];
+        matmul_q(BT, Pq, BTP, m, n, n, sh, &st);
+        matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
+        add_q(Rq, BTPB, Rp, m * m);
+        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
+        matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
+
+    lastIterations = st.iterations;
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm();
+    return true;
+}
+
+bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
+{
+    using namespace fxq;
+    const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
+
+    if (!A || !B || !Q || !R || !K) return false;
+    if (n != 6 || m != 3) return false;
+    if (!isSystemControllable()) return false;
+
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;
+
+    q_t BT[18];
+    transpose_q(Bq, BT, n, m);
+    q_t G0[36];
+    {
+        q_t Rinv[9], BRi[18];
+        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
+        matmul_q(BRi, BT, G0, n, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    // D diagonal por normas de linha de A (float — n=6 valores, sqrt barato;
+    // mesma heurística do par float computeGainMatrixSDA_Scaled()).
+    float Df[6], Dinvf[6];
+    for (int i = 0; i < n; i++) {
+        float row_norm = 0.0f;
+        for (int j = 0; j < n; j++) row_norm += A[i * n + j] * A[i * n + j];
+        row_norm = sqrtf(row_norm);
+        Df[i] = (row_norm > 1e-10f) ? (1.0f / sqrtf(row_norm)) : 1.0f;
+        Dinvf[i] = 1.0f / Df[i];
+    }
+    q_t Dq[6], Dinvq[6];
+    for (int i = 0; i < n; i++) { Dq[i] = f2q(Df[i], sh, &st); Dinvq[i] = f2q(Dinvf[i], sh, &st); }
+
+    // Â=DAD⁻¹, Ĝ=DGD, Ĥ=D⁻¹QD⁻¹ (D diagonal ⇒ 3n² mults escalares)
+    q_t Ak[36], Gk[36], Hk[36];
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            Ak[i * n + j] = qmul(qmul(Dq[i], Aq[i * n + j], sh, &st), Dinvq[j], sh, &st);
+            Gk[i * n + j] = qmul(qmul(Dq[i], G0[i * n + j], sh, &st), Dq[j], sh, &st);
+            Hk[i * n + j] = qmul(qmul(Dinvq[i], Qq[i * n + j], sh, &st), Dinvq[j], sh, &st);
+        }
+    }
+    if (st.overflow) return false;
+
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
+        return false;
+    if (st.overflow) return false;
+
+    // P = D · Ĥ · D (recuperação, mesma convenção corrigida do par float)
+    q_t Pq[36];
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            Pq[i * n + j] = qmul(qmul(Dq[i], Hk[i * n + j], sh, &st), Dq[j], sh, &st);
+    if (st.overflow) return false;
+
+    q_t Kq[18];
+    {
+        q_t BTP[18], BTPB[9], Rp[9], BTPA[18];
+        matmul_q(BT, Pq, BTP, m, n, n, sh, &st);
+        matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
+        add_q(Rq, BTPB, Rp, m * m);
+        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
+        matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
+
+    lastIterations = st.iterations;
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm();
+    return true;
+}
+
+bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
+{
+    // Setup do pencil 12x12 no MESMO shift do resto (Q13.18) — não Q9.22
+    // como uma primeira versão tentou. O que limita a faixa não é N1
+    // (‖N1‖∞ ~200-700 nos casos testados), é Φ=N1⁻¹: medido em toda a
+    // bateria de 225 casos, ‖Φ‖∞ tem mediana 738 mas passa de 46000 no caso
+    // adversarial C5 (disparidade de escala 1000×) — nenhum shift fixo único
+    // cobre as duas pontas sem perder resolução onde importa. Q13.18 cobre
+    // 224/225 casos (só falha o C5, um stress test deliberado, não uma
+    // condição de voo real) — ver docs/auditoria_solvers_riccati.md.
+    // Blocos em escopos aninhados de propósito — o maior consumo de stack
+    // (N1/Phi/Phi11-22, ~2,3kB) sai de escopo antes do laço de duplicação,
+    // que por sua vez chama invert_q (~1,15kB) de novo.
+    using namespace fxq;
+    const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
+    const float gamma = 0.5f;
+    const int n2 = 2 * n;
+
+    if (!A || !B || !Q || !R || !K) return false;
+    if (n != 6 || m != 3) return false;
+    if (!isSystemControllable()) return false;
+
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;
+
+    q_t BT[18];
+    transpose_q(Bq, BT, n, m);
+
+    q_t G0[36];
+    {
+        q_t Rinv[9], BRi[18];
+        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
+        matmul_q(BRi, BT, G0, n, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    q_t gammaQ = f2q(gamma, sh, &st);
+    q_t oneQ   = f2q(1.0f, sh, &st);
+
+    q_t Ak[36], Gk[36], Hk[36]; // (Â,Ĝ,Ĥ) — montadas no bloco abaixo
+    {
+        q_t Ak2[36], Gk2[36], Hk2[36];
+        {
+            // N1 = [[I-γA, -γG0], [γH0, I-γA']] (2n×2n); H0=Q
+            q_t N1[144], Phi[144];
+            memset(N1, 0, sizeof(N1));
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    N1[i * n2 + j]       = ((i == j) ? oneQ : 0) - qmul(gammaQ, Aq[i * n + j], sh, &st);
+                    N1[i * n2 + (n + j)] = -qmul(gammaQ, G0[i * n + j], sh, &st);
+                    N1[(n + i) * n2 + j] =  qmul(gammaQ, Qq[i * n + j], sh, &st);
+                    N1[(n + i) * n2 + (n + j)] = ((i == j) ? oneQ : 0) - qmul(gammaQ, Aq[j * n + i], sh, &st);
+                }
+            }
+            if (st.overflow) return false;
+
+            if (!invert_q(N1, Phi, n2, sh, &st)) return false; // pencil singular/fora de faixa → fallback
+            if (st.overflow) return false;
+
+            q_t Phi11[36], Phi12[36], Phi21[36], Phi22[36];
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    Phi11[i * n + j] = Phi[i * n2 + j];
+                    Phi12[i * n + j] = Phi[i * n2 + (n + j)];
+                    Phi21[i * n + j] = Phi[(n + i) * n2 + j];
+                    Phi22[i * n + j] = Phi[(n + i) * n2 + (n + j)];
+                }
+            }
+
+            q_t AmG[36], ATmG[36];
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    AmG[i * n + j]  = Aq[i * n + j] - ((i == j) ? gammaQ : 0);
+                    ATmG[i * n + j] = Aq[j * n + i] - ((i == j) ? gammaQ : 0);
+                }
+            }
+
+            // Â = Φ11·(A-γI) - Φ12·Q ; Ĝ = Φ11·G0 + Φ12·(A'-γI) ; Ĥ = -Φ21·(A-γI) + Φ22·Q
+            q_t T1[36], T2[36];
+            matmul_q(Phi11, AmG, T1, n, n, n, sh, &st);
+            matmul_q(Phi12, Qq, T2, n, n, n, sh, &st);
+            sub_q(T1, T2, Ak2, n * n);
+
+            matmul_q(Phi11, G0, T1, n, n, n, sh, &st);
+            matmul_q(Phi12, ATmG, T2, n, n, n, sh, &st);
+            add_q(T1, T2, Gk2, n * n);
+
+            matmul_q(Phi21, AmG, T1, n, n, n, sh, &st);
+            matmul_q(Phi22, Qq, T2, n, n, n, sh, &st);
+            sub_q(T2, T1, Hk2, n * n);
+        }
+        if (st.overflow) return false;
+
+        memcpy(Ak, Ak2, sizeof(Ak));
+        memcpy(Gk, Gk2, sizeof(Gk));
+        memcpy(Hk, Hk2, sizeof(Hk));
+    }
+    if (st.overflow) return false;
+
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
+        return false;
+    if (st.overflow) return false;
+
+    // K = (R+B'PB)^-1 B'PA, com A ORIGINAL (Aq); P=Hk já é o da DARE original
+    // (mesma propriedade do par float — ver comentário de computeGainMatrixSDA_SS()).
+    q_t Kq[18];
+    {
+        q_t BTP[18], BTPB[9], Rp[9], BTPA[18];
+        matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
+        matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
+        add_q(Rq, BTPB, Rp, m * m);
+        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
+        matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
+
+    lastIterations = st.iterations;
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm();
+    return true;
+}
+
+bool AutoLQR::computeGainMatrixIterative_Fixed()
+{
+    // Value iteration em fixed-point (recorrência própria, não usa
+    // doubling_loop_q). Warm-start compartilha o mesmo P_warm (float) do
+    // par float computeGainMatrixIterative() — é o mesmo P físico sendo
+    // aproximado, não importa a aritmética que o produziu; a alternativa de
+    // um buffer fixed-point dedicado só complicaria sem motivo real.
+    using namespace fxq;
+    const int n = stateSize, m = controlSize;
+    const int sh = Q_SHIFT_DEFAULT;
+    const int nn = n * n;
+    const int maxIterations = 100; // mesmo orçamento do par float (convergência linear, precisa de mais iterações que o doubling)
+    const int invRelTolerance = 1000;
+
+    if (!A || !B || !Q || !R || !K || !P_warm) return false;
+    if (n != 6 || m != 3) return false;
+    if (!isSystemControllable()) return false;
+
+    Status st;
+    q_t Aq[36], Bq[18], Qq[36], Rq[9];
+    for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
+    for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
+    for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
+    if (st.overflow) return false;
+
+    q_t AT[36], BT[18];
+    transpose_q(Aq, AT, n, n);
+    transpose_q(Bq, BT, n, m);
+
+    // Regularização: 1e-8 do par float vira zero exato em Q13.18 (0,0026 LSB)
+    // — sobe conscientemente para 1e-5 (2,6 LSB), acima do piso de quantização.
+    q_t eps = f2q(1e-5f, sh, &st);
+
+    float Pw_norm = 0.0f;
+    for (int i = 0; i < nn; i++) Pw_norm += fabsf(P_warm[i]);
+    bool has_warm_start = (Pw_norm > 1e-6f);
+
+    q_t Pk[36];
+    if (has_warm_start) {
+        for (int i = 0; i < nn; i++) Pk[i] = f2q(P_warm[i], sh, &st);
+    } else {
+        memcpy(Pk, Qq, sizeof(Pk));
+    }
+    if (st.overflow) return false;
+
+    int iters = maxIterations;
+    for (int it = 0; it < maxIterations; it++) {
+        q_t PA[36], PB[18], ATPA[36], BTPB[9], BTPA[18];
+        matmul_q(Pk, Aq, PA, n, n, n, sh, &st);
+        matmul_q(Pk, Bq, PB, n, n, m, sh, &st);
+        matmul_q(AT, PA, ATPA, n, n, n, sh, &st);
+        matmul_q(BT, PB, BTPB, m, n, m, sh, &st);
+        matmul_q(BT, PA, BTPA, m, n, n, sh, &st);
+
+        q_t S[9];
+        add_q(Rq, BTPB, S, m * m);
+        for (int i = 0; i < m; i++) S[i * m + i] += eps;
+
+        q_t Sinv[9];
+        if (!invert_q(S, Sinv, m, sh, &st)) return false;
+
+        q_t Ktmp[18], ATPB[18], corr[36];
+        matmul_q(Sinv, BTPA, Ktmp, m, m, n, sh, &st);
+        matmul_q(AT, PB, ATPB, n, n, m, sh, &st);
+        matmul_q(ATPB, Ktmp, corr, n, m, n, sh, &st);
+
+        q_t Pnext[36];
+        for (int i = 0; i < nn; i++) Pnext[i] = Qq[i] + ATPA[i] - corr[i];
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++) {
+                q_t avg = (Pnext[i * n + j] + Pnext[j * n + i]) / 2;
+                Pnext[i * n + j] = avg;
+                Pnext[j * n + i] = avg;
+            }
+
+        q_t dmax = 0, hmax = 0;
+        for (int i = 0; i < nn; i++) {
+            q_t d = Pnext[i] - Pk[i]; if (d < 0) d = -d;
+            q_t h = Pk[i];            if (h < 0) h = -h;
+            if (d > dmax) dmax = d;
+            if (h > hmax) hmax = h;
+        }
+        memcpy(Pk, Pnext, sizeof(Pk));
+        if ((int64_t)dmax * invRelTolerance < (int64_t)hmax) { iters = it + 1; break; }
+    }
+    if (st.overflow) return false;
+
+    q_t Kq[18];
+    {
+        q_t PA[36], PB[18], BTPB[9], BTPA[18], S[9];
+        matmul_q(Pk, Aq, PA, n, n, n, sh, &st);
+        matmul_q(Pk, Bq, PB, n, n, m, sh, &st);
+        matmul_q(BT, PB, BTPB, m, n, m, sh, &st);
+        matmul_q(BT, PA, BTPA, m, n, n, sh, &st);
+        add_q(Rq, BTPB, S, m * m);
+        for (int i = 0; i < m; i++) S[i * m + i] += eps;
+        if (!invert_q(S, S, m, sh, &st)) return false;
+        matmul_q(S, BTPA, Kq, m, m, n, sh, &st);
+    }
+    if (st.overflow) return false;
+
+    for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
+    if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pk[i], sh);
+    for (int i = 0; i < nn; i++) P_warm[i] = q2f(Pk[i], sh); // atualiza o warm-start p/ a próxima chamada
+
+    lastIterations = iters;
+    residualHistoryCount = 0;
+    for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
+    lastResidual = computeDareResidualNorm();
+    return true;
 }
 
 int AutoLQR::getLastIterations() const {
