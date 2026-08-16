@@ -2,6 +2,17 @@
 #define FIXED_POINT_Q_H
 
 #include <stdint.h>
+#include <Arduino.h> // p/ IRAM_ATTR (garante o macro definido mesmo se FixedPointQ.cpp
+                      // for compilado sem AutoLQR.h/ArduinoEigen.h por perto)
+
+// Mesmo padrão de MatrixOperations.h:7-15 — evita cache-miss de instrução na
+// flash para o código que fica no laço quente (regressão de ~15% do
+// SDA_FIXED após 13b33bb; ver docs/auditoria_solvers_riccati.md, Seção 12).
+#if defined(ESP32)
+    #define FXQ_FAST_ATTR IRAM_ATTR
+#else
+    #define FXQ_FAST_ATTR
+#endif
 
 // ============================================================================
 // Kernel de ponto fixo Q-format para os solvers de Riccati em ESP32-S2 (sem
@@ -35,17 +46,98 @@ q_t   f2q(float x, int sh, Status* st);
 float q2f(q_t x, int sh);
 q_t   requant(q_t x, int shFrom, int shTo, Status* st); // converte entre shifts (ex.: Q9.22 -> Q13.18)
 
-q_t qmul(q_t a, q_t b, int sh, Status* st);
-q_t qdiv(q_t a, q_t b, int sh, Status* st);
+// qmul/qdiv em `inline` no header (não em FixedPointQ.cpp): são chamadas
+// dentro do laço de eliminação de invert_q (até n*(2n) vezes por chamada) e,
+// como funções externas, perderam o inlining que tinham quando o kernel
+// vivia dentro do namespace anônimo de AutoLQR.cpp — parte da regressão de
+// ~15% medida no SDA_FIXED após 13b33bb (ver docs/auditoria_solvers_riccati.md,
+// Seção 10). `inline` no header não depende de LTO para ser recuperado.
+inline q_t qmul(q_t a, q_t b, int sh, Status* st) {
+    int64_t r = ((int64_t)a * (int64_t)b) >> sh;
+    if (r > INT32_MAX) { st->overflow = true; return INT32_MAX; }
+    if (r < INT32_MIN) { st->overflow = true; return INT32_MIN; }
+    return (q_t)r;
+}
 
-void matmul_q(const q_t* a, const q_t* b, q_t* c, int r1, int c1, int c2, int sh, Status* st);
-void transpose_q(const q_t* a, q_t* at, int r, int c);
-void add_q(const q_t* a, const q_t* b, q_t* c, int n);
-void sub_q(const q_t* a, const q_t* b, q_t* c, int n);
+inline q_t qdiv(q_t a, q_t b, int sh, Status* st) {
+    if (b == 0) { st->overflow = true; return (a >= 0) ? INT32_MAX : INT32_MIN; }
+    int64_t r = ((int64_t)a << sh) / b; // estoura se b minúsculo -> clamp + flag
+    if (r > INT32_MAX) { st->overflow = true; return INT32_MAX; }
+    if (r < INT32_MIN) { st->overflow = true; return INT32_MIN; }
+    return (q_t)r;
+}
+
+// matmul_q: `inline` + `__restrict__`, mesmo tratamento que
+// MatrixOperations::matrixMultiply já tem no lado float — e um atalho 6x6x6
+// desenrolado, que é a forma que domina o laço de duplicação (8 das 8 matmuls
+// por iteração usam n=6). A ordem de acumulação do atalho é IDÊNTICA à do
+// laço genérico (mesmo `for k`, mesmo int64_t acc, mesmo `>> sh`) — resultado
+// bit-a-bit igual, só sem overhead de chamada/loop.
+// SEM FXQ_FAST_ATTR aqui de propósito: como é inlinado dentro de
+// doubling_loop_q (que já tem IRAM_ATTR), aplicar o atributo também na
+// função inlinada duplica a diretiva de seção e o linker Xtensa rejeita com
+// "dangerous relocation: l32r: literal placed after use" — o código já vai
+// para IRAM via o `IRAM_ATTR` da função externa que o inclui.
+inline void matmul_q(const q_t* __restrict__ a, const q_t* __restrict__ b,
+                      q_t* __restrict__ c, int r1, int c1, int c2, int sh, Status* st) {
+    if (r1 == 6 && c1 == 6 && c2 == 6) {
+        for (int i = 0; i < 6; i++) {
+            const q_t* ai = a + i * 6;
+            for (int j = 0; j < 6; j++) {
+                int64_t acc = (int64_t)ai[0] * b[0 * 6 + j] + (int64_t)ai[1] * b[1 * 6 + j]
+                             + (int64_t)ai[2] * b[2 * 6 + j] + (int64_t)ai[3] * b[3 * 6 + j]
+                             + (int64_t)ai[4] * b[4 * 6 + j] + (int64_t)ai[5] * b[5 * 6 + j];
+                int64_t r = acc >> sh;
+                if (r > INT32_MAX)      { st->overflow = true; r = INT32_MAX; }
+                else if (r < INT32_MIN) { st->overflow = true; r = INT32_MIN; }
+                q_t v = (q_t)r;
+                c[i * 6 + j] = v;
+#ifdef FXQ_INSTRUMENT
+                q_t av = (v < 0) ? -v : v;
+                if (av > st->max_abs_seen) st->max_abs_seen = av;
+#endif
+            }
+        }
+        return;
+    }
+    for (int i = 0; i < r1; i++) {
+        for (int j = 0; j < c2; j++) {
+            int64_t acc = 0;
+            for (int k = 0; k < c1; k++) acc += (int64_t)a[i * c1 + k] * (int64_t)b[k * c2 + j];
+            int64_t r = acc >> sh;
+            if (r > INT32_MAX)      { st->overflow = true; r = INT32_MAX; }
+            else if (r < INT32_MIN) { st->overflow = true; r = INT32_MIN; }
+            q_t v = (q_t)r;
+            c[i * c2 + j] = v;
+#ifdef FXQ_INSTRUMENT
+            q_t av = (v < 0) ? -v : v;
+            if (av > st->max_abs_seen) st->max_abs_seen = av;
+#endif
+        }
+    }
+}
+
+// (idem: sem FXQ_FAST_ATTR — inlinadas dentro de funções que já o têm)
+inline void transpose_q(const q_t* __restrict__ a, q_t* __restrict__ at, int r, int c) {
+    for (int i = 0; i < r; i++)
+        for (int j = 0; j < c; j++) at[j * r + i] = a[i * c + j];
+}
+
+inline void add_q(const q_t* __restrict__ a, const q_t* __restrict__ b,
+                   q_t* __restrict__ c, int n) {
+    for (int i = 0; i < n; i++) c[i] = a[i] + b[i];
+}
+
+inline void sub_q(const q_t* __restrict__ a, const q_t* __restrict__ b,
+                   q_t* __restrict__ c, int n) {
+    for (int i = 0; i < n; i++) c[i] = a[i] - b[i];
+}
 
 // Inversão Gauss-Jordan com pivotamento parcial, em Q-format. n até 12 (serve
 // tanto às matrizes 6x6 do laço quanto ao pencil 12x12 do setup do SDA_SS).
-bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st);
+// Definida em FixedPointQ.cpp (grande demais para inline manual sem duplicar
+// ~50 linhas por unidade de tradução) — só o atributo de flash é aplicado aqui.
+FXQ_FAST_ATTR bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st);
 
 // Laço de duplicação estrutural compartilhado entre SDA, SDA_SS, SDA_SCALED,
 // ASDA e ADDA. Ak,Gk,Hk são n×n, atualizados in-place (assume n<=6 — todos os
@@ -58,7 +150,7 @@ bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st);
 // fatores de reescalonamento, calculado em float (o produto de ~10 fatores
 // em [0,1;10] pode exceder a faixa representável em Q13.18). A extração
 // P = H_final * cum_s deve ser feita pelo chamador, fora do laço.
-bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Variant variant,
+FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Variant variant,
                       int maxIterations, int invRelTolerance,
                       float* cum_s_out, Status* st);
 

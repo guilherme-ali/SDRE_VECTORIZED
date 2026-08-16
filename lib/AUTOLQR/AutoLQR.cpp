@@ -21,7 +21,9 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
     , reference(nullptr)
     , lastIterations(-1)
     , lastResidual(-1.0f)
+    , residualDirty(false)
     , lastStepDelta(-1.0f)
+    , lastFixedPointMaxAbsSeen(0.0f)
     , residualHistoryCount(0)
 {
     // Inicializar histórico de resíduos
@@ -243,7 +245,8 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     lastIterations = st.iterations;
     residualHistoryCount = 0; // kernel fixed-point não expõe resíduo por iteração
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm(); // resíduo real da DARE, calculado em float32
+    residualDirty = true; // resíduo real calculado sob demanda em getLastResidual()
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -484,7 +487,7 @@ bool AutoLQR::computeGainMatrixSDA()
         matrixMultiply(R_plus_BTPB, BT_P_A, K, controlSize, controlSize, stateSize);
     }
 
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
 
     // Limpeza
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -995,6 +998,7 @@ bool AutoLQR::computeGainMatrixVanDooren()
     // ========================================================================
     lastIterations = 1;  // Método direto = 1 "iteração"
     lastResidual = 0.0f; // Solução direta, sem resíduo iterativo
+    residualDirty = false; // valor final, não recalcular sob demanda
 
     // ========================================================================
     // Limpeza
@@ -1285,7 +1289,7 @@ bool AutoLQR::computeGainMatrixIterative()
     matrixCopy(Pw, P, nn);
     matrixCopy(Pw, P_warm, nn);
 
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
 
     // Limpeza
     delete[] Pw;
@@ -1540,7 +1544,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
         delete[] BT_P; delete[] BT_P_B; delete[] BT_P_A; delete[] R_plus_BTPB;
     }
 
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
 
     delete[] R_inv; delete[] BT;
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -1761,7 +1765,7 @@ bool AutoLQR::computeGainMatrixASDA()
         delete[] BT_P_A;
         delete[] R_plus_BTPB;
 
-        lastResidual = computeDareResidualNorm();
+        residualDirty = true;
     }
 
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -1984,7 +1988,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         delete[] BT_P_A;
         delete[] R_plus_BTPB;
 
-        lastResidual = computeDareResidualNorm();
+        residualDirty = true;
     }
 
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -2176,7 +2180,7 @@ bool AutoLQR::computeGainMatrixADDA()
         matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
     }
 
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
 
     // Limpeza
     delete[] Ak; delete[] Gk; delete[] Hk;
@@ -2250,7 +2254,8 @@ bool AutoLQR::computeGainMatrixADDA_Fixed()
     lastIterations = st.iterations;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -2319,7 +2324,8 @@ bool AutoLQR::computeGainMatrixASDA_Fixed()
     lastIterations = st.iterations;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -2404,7 +2410,8 @@ bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
     lastIterations = st.iterations;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -2537,7 +2544,8 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
     lastIterations = st.iterations;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -2649,7 +2657,8 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     lastIterations = iters;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
-    lastResidual = computeDareResidualNorm();
+    residualDirty = true;
+    lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
     return true;
 }
 
@@ -2658,11 +2667,19 @@ int AutoLQR::getLastIterations() const {
 }
 
 float AutoLQR::getLastResidual() const {
+    if (residualDirty) {
+        lastResidual = computeDareResidualNorm();
+        residualDirty = false;
+    }
     return lastResidual;
 }
 
 float AutoLQR::getLastStepDelta() const {
     return lastStepDelta;
+}
+
+float AutoLQR::getLastFixedPointMaxAbsSeen() const {
+    return lastFixedPointMaxAbsSeen;
 }
 
 int AutoLQR::getResidualHistory(float* residuals) const {

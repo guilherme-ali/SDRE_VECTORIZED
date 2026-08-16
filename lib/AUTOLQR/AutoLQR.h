@@ -131,8 +131,13 @@ public:
     /**
      * @brief Get the final residual from last computation
      * @return Norma do resíduo REAL da DARE, ‖A'PA-P-A'PB(R+B'PB)^-1B'PA+Q‖_F/‖Q‖_F,
-     *         calculada uma vez ao final do solver — não o critério interno de parada
-     *         (ver getLastStepDelta()). -1 se P/A/B/Q/R indisponíveis, -2 se R+B'PB singular.
+     *         calculada preguiçosamente (só na primeira chamada após um solve — ver
+     *         residualDirty) — não o critério interno de parada (ver getLastStepDelta()).
+     *         -1 se P/A/B/Q/R indisponíveis, -2 se R+B'PB singular.
+     * @note Chamar DEPOIS de computeGains() e ANTES de qualquer nova setStateMatrix()/
+     *       setInputMatrix()/setCostMatrices() — o cálculo preguiçoso lê os A/B/Q/R/P
+     *       atuais no momento da CHAMADA, não do solve; mutar as matrizes entre os dois
+     *       invalida o resíduo reportado (mesma convenção que os benchmarks já seguem).
      */
     float getLastResidual() const;
 
@@ -142,6 +147,16 @@ public:
      *         de cada solver — NÃO é o resíduo da DARE, ver getLastResidual()).
      */
     float getLastStepDelta() const;
+
+    /**
+     * @brief Maior |valor| real visto em qualquer produto matricial da última chamada
+     *        bem-sucedida de um método `_FIXED` — mede a margem até o teto ±8192 do
+     *        Q13.18 (ver docs/auditoria_solvers_riccati.md, Seção 9/10).
+     * @return Magnitude em unidades reais (não o inteiro Q-format). 0 se o último método
+     *         chamado não foi `_FIXED`, se falhou, ou se compilado sem -DFXQ_INSTRUMENT
+     *         (o env de voo não paga esse custo por padrão — ver FixedPointQ.cpp).
+     */
+    float getLastFixedPointMaxAbsSeen() const;
 
     /**
      * @brief Get residuals history for first iterations
@@ -169,8 +184,19 @@ private:
     float* reference; ///< To store reference values
     
     int lastIterations; ///< Number of iterations in last computation
-    float lastResidual; ///< Resíduo REAL da DARE (ver getLastResidual())
+    mutable float lastResidual; ///< Resíduo REAL da DARE (ver getLastResidual()) — cache preguiçoso
+    mutable bool residualDirty; ///< true = lastResidual precisa ser recalculado na próxima
+                                 ///< getLastResidual(). Tira computeDareResidualNorm() (11
+                                 ///< new[]/delete[] + 7 matmuls) do caminho de voo, que nunca lê
+                                 ///< o resíduo — só quem chama getLastResidual() paga o custo,
+                                 ///< e só uma vez por solve (ver docs/auditoria_solvers_riccati.md,
+                                 ///< Seção 12).
     float lastStepDelta; ///< Critério interno de parada da última iteração (ver getLastStepDelta())
+    float lastFixedPointMaxAbsSeen; ///< Maior |valor| real visto em qualquer matmul_q na última
+                                     ///< chamada bem-sucedida de um método _FIXED (unidades reais,
+                                     ///< não o inteiro Q-format; 0 se o método não é _FIXED, se
+                                     ///< falhou, ou se compilado sem -DFXQ_INSTRUMENT). Mede a
+                                     ///< margem até o teto ±8192 do Q13.18 — ver getLastFixedPointMaxAbsSeen().
     float residualHistory[10]; ///< Residuals for first 10 iterations
     int residualHistoryCount; ///< Number of valid entries in residualHistory
 

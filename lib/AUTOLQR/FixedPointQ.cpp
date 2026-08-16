@@ -29,51 +29,10 @@ q_t requant(q_t x, int shFrom, int shTo, Status* st) {
     return (q_t)(x >> (-d));
 }
 
-q_t qmul(q_t a, q_t b, int sh, Status* st) {
-    int64_t r = ((int64_t)a * (int64_t)b) >> sh;
-    if (r > INT32_MAX) { st->overflow = true; return INT32_MAX; }
-    if (r < INT32_MIN) { st->overflow = true; return INT32_MIN; }
-    return (q_t)r;
-}
+// matmul_q/transpose_q/add_q/sub_q agora `inline` em FixedPointQ.h (ver
+// comentário lá — recuperar o inlining perdido em 13b33bb).
 
-q_t qdiv(q_t a, q_t b, int sh, Status* st) {
-    if (b == 0) { st->overflow = true; return (a >= 0) ? INT32_MAX : INT32_MIN; }
-    int64_t r = ((int64_t)a << sh) / b; // estoura se b minúsculo -> clamp + flag
-    if (r > INT32_MAX) { st->overflow = true; return INT32_MAX; }
-    if (r < INT32_MIN) { st->overflow = true; return INT32_MIN; }
-    return (q_t)r;
-}
-
-void matmul_q(const q_t* a, const q_t* b, q_t* c, int r1, int c1, int c2, int sh, Status* st) {
-    for (int i = 0; i < r1; i++) {
-        for (int j = 0; j < c2; j++) {
-            int64_t acc = 0;
-            for (int k = 0; k < c1; k++) acc += (int64_t)a[i * c1 + k] * (int64_t)b[k * c2 + j];
-            int64_t r = acc >> sh;
-            if (r > INT32_MAX)      { st->overflow = true; r = INT32_MAX; }
-            else if (r < INT32_MIN) { st->overflow = true; r = INT32_MIN; }
-            q_t v = (q_t)r;
-            c[i * c2 + j] = v;
-            q_t av = (v < 0) ? -v : v;
-            if (av > st->max_abs_seen) st->max_abs_seen = av;
-        }
-    }
-}
-
-void transpose_q(const q_t* a, q_t* at, int r, int c) {
-    for (int i = 0; i < r; i++)
-        for (int j = 0; j < c; j++) at[j * r + i] = a[i * c + j];
-}
-
-void add_q(const q_t* a, const q_t* b, q_t* c, int n) {
-    for (int i = 0; i < n; i++) c[i] = a[i] + b[i];
-}
-
-void sub_q(const q_t* a, const q_t* b, q_t* c, int n) {
-    for (int i = 0; i < n; i++) c[i] = a[i] - b[i];
-}
-
-bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st) {
+FXQ_FAST_ATTR bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st) {
     q_t aug[12 * 24]; // n até 12 (matrizes 6x6 do laço e o pencil 12x12 do setup do SDA_SS)
     const int n2 = 2 * n;
     const q_t one = f2q(1.0f, sh, st);
@@ -92,8 +51,16 @@ bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st) {
         if (maxv < pivot_floor) return false; // ~singular no domínio fixed-point
         if (mr != i)
             for (int j = 0; j < n2; j++) { q_t t = aug[i * n2 + j]; aug[i * n2 + j] = aug[mr * n2 + j]; aug[mr * n2 + j] = t; }
+        // Recíproco do pivô calculado UMA vez e multiplicado nas n2 colunas,
+        // em vez de n2 divisões — o Xtensa LX7 não tem divisão de 64 bits em
+        // hardware (fase 2 da otimização, ver docs/auditoria_solvers_riccati.md
+        // Seção 12; MUDA o arredondamento — inv_piv perde a resolução de
+        // qdiv(x,piv) direto, então este resultado NÃO é mais bit-a-bit igual
+        // ao de antes; revalidado por tolerância contra o scipy, não por
+        // igualdade exata).
         q_t piv = aug[i * n2 + i];
-        for (int j = 0; j < n2; j++) aug[i * n2 + j] = qdiv(aug[i * n2 + j], piv, sh, st);
+        q_t inv_piv = qdiv(one, piv, sh, st);
+        for (int j = 0; j < n2; j++) aug[i * n2 + j] = qmul(aug[i * n2 + j], inv_piv, sh, st);
         for (int k = 0; k < n; k++)
             if (k != i) {
                 q_t f = aug[k * n2 + i];
@@ -109,7 +76,7 @@ bool invert_q(const q_t* src, q_t* dst, int n, int sh, Status* st) {
 // ----------------------------------------------------------------------------
 // Laço de duplicação. n<=6 assumido (buffers de 36 elementos).
 // ----------------------------------------------------------------------------
-bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Variant variant,
+FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Variant variant,
                       int maxIterations, int invRelTolerance,
                       float* cum_s_out, Status* st) {
     const int nn = n * n;
