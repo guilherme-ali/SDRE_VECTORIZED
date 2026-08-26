@@ -6,3 +6,5 @@
 **/desktop.ini
 logs
 *.pyc
+/build/
+/outputs/

@@ -13,6 +13,10 @@
 #include <Wire.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+// esp_timer_get_time(): 1 us de resolucao, mesma base de tempo usada pelos
+// benchmarks (test/benchmark_solvers.cpp etc.) — paridade metodologica com o
+// Exp. E, que compara o ciclo de voo com os numeros de bancada.
+#include "esp_timer.h"
 
 // ===== Flags de configuracao =====
 const bool DEBUG_MODE       = false; // true: prints detalhados; false: Serial Plotter
@@ -89,6 +93,17 @@ float state_shared[7]; // roll, pitch, yaw, p, q, r, omega_r
 volatile unsigned long sdre_t_updateMatrix = 0;
 volatile unsigned long sdre_t_computeGains = 0;
 volatile unsigned long sdre_t_total        = 0;
+
+// Desfecho/iteracoes da ultima chamada a computeGains() — escritos onde o solver
+// roda (SDRETask no async, fim do loop no sincrono) e lidos pela telemetria.
+// Valores: ver AutoLQR::SolveOutcome (0=Converged, 1=Budget, 2=Breakdown).
+volatile uint8_t sdre_last_iters   = 0;
+volatile uint8_t sdre_last_outcome = 0;
+
+// Ciclos em que o trabalho util (processingTime) estourou o periodo de amostragem
+// (SAMPLING_TIME_S) — nesses ciclos nao ha padding e o periodo real e maior que o
+// nominal, o que quebra a premissa de dt fixo de Ad/Bd e do Madgwick.
+volatile uint32_t overrunCount = 0;
 
 // ===== Matrizes do sistema (preenchidas em updateSystemMatrix) =====
 float A[STATE_SIZE * STATE_SIZE] = {
@@ -192,7 +207,7 @@ const float MAG_SCALE_Z = 1.0210f;
 MotorControl motors;
 LEDControl   leds;
 WiFiComm     wifiComm("ESP-DRONE", "12345678", 2390);
-Telemetry    telemetry; // ~68 KB em RAM (1000 amostras x 68 B)
+Telemetry    telemetry; // ~76 KB em RAM (1000 amostras x 76 B — ver Telemetry.h)
 
 bool            remote_control_enabled = false;
 CommanderPacket remote_command;
@@ -271,17 +286,24 @@ void sdreTaskCode(void * parameter) {
             memcpy(local_state, state_shared, sizeof(local_state));
             xSemaphoreGive(matricesMutex);
 
-            unsigned long t0 = micros();
+            int64_t t0 = esp_timer_get_time();
             updateSystemMatrix(local_state[0], local_state[1], local_state[2],
                                local_state[3], local_state[4], local_state[5],
                                local_state[6]);
-            unsigned long t1 = micros();
+            int64_t t1 = esp_timer_get_time();
             sdreController.computeGains();
-            unsigned long t2 = micros();
+            int64_t t2 = esp_timer_get_time();
 
-            sdre_t_updateMatrix = t1 - t0;
-            sdre_t_computeGains = t2 - t1;
-            sdre_t_total        = t2 - t0;
+            // Telemetria do solver (Exp. E): iteracoes e desfecho da ULTIMA chamada.
+            // No modo async o solver roda aqui, entao o loop principal so consegue
+            // ler estes valores por estas variaveis compartilhadas.
+            int last_it       = sdreController.getLastIterations();
+            sdre_last_iters   = (last_it < 0) ? 255 : (uint8_t)((last_it > 254) ? 254 : last_it);
+            sdre_last_outcome = (uint8_t)sdreController.getLastOutcome();
+
+            sdre_t_updateMatrix = (unsigned long)(t1 - t0);
+            sdre_t_computeGains = (unsigned long)(t2 - t1);
+            sdre_t_total        = (unsigned long)(t2 - t0);
 
             xSemaphoreTake(matricesMutex, portMAX_DELAY);
             sdreController.exportGains(K_shared);
@@ -296,6 +318,16 @@ void sdreTaskCode(void * parameter) {
 void setup() {
     // Mutex deve existir antes de qualquer xSemaphoreTake (evita assert fail em pxQueue)
     matricesMutex = xSemaphoreCreateMutex();
+
+    // Criterio de parada CASADO com os experimentos de bancada (tau=1e-3,
+    // orcamento de 200 iteracoes) — sem isto o firmware usaria o default do
+    // construtor (relTolerance=1e-3, maxIterations=100), e o orcamento menor
+    // censuraria chamadas que na bancada convergem, tornando o Exp. E
+    // incomparavel com os demais. Instancia UNICA de AutoLQR no firmware:
+    // sdreController atende tanto o caminho sincrono quanto a SDRETask, entao
+    // basta configurar aqui — antes do xTaskCreate, para que nem a primeira
+    // chamada da task rode com o orcamento default.
+    sdreController.setStoppingCriterion(1e-3f, 200);
 
     if (USE_ASYNC_SDRE) {
         // Prioridade 0 (loop do Arduino roda em prio 1 — fica em background).
@@ -437,31 +469,37 @@ void setup() {
         Serial.println("❌ Falha ao iniciar WiFi/UDP!");
     }
 
+    Serial.printf("Telemetria: sizeof(Sample)=%u B | buffer=%u amostras = %u B\n",
+                  (unsigned)sizeof(Telemetry::Sample), (unsigned)Telemetry::CAPACITY,
+                  (unsigned)(sizeof(Telemetry::Sample) * Telemetry::CAPACITY));
     Serial.println("Sistema inicializado com sucesso!");
     Serial.println("--------------------------------------------------");
 }
 
 void loop(){
-    unsigned long startTime = micros();
-    
+    // Base de tempo: esp_timer_get_time() (int64_t, us). As DURACOES derivadas
+    // seguem em unsigned long (cabem de sobra em 32 bits) para nao mexer nos
+    // formatos %lu dos prints.
+    int64_t startTime = esp_timer_get_time();
+
     // ===== PROFILING: Tempos parciais =====
     unsigned long t_leds, t_battery, t_wifi, t_mpu, t_mag, t_filter, t_angles, t_matrix, t_lqr, t_control_logic, t_motor_calc, t_motor_set;
-    unsigned long t_checkpoint = micros();
+    int64_t t_checkpoint = esp_timer_get_time();
 
     // ----- LEDs + bateria -----
     leds.update();
-    t_leds = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_leds = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // Bateria critica/baixa apenas acende LED — nao desarma motores em voo
     leds.setLowPower(leds.isCriticalBattery() || leds.isLowBattery());
-    t_battery = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_battery = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // ----- WiFi/UDP -----
     wifiComm.update();
-    t_wifi = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_wifi = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     leds.setUDPReceiving(!tilt_failsafe_latched && wifiComm.isClientConnected());
 
@@ -479,15 +517,15 @@ void loop(){
     gy = bq_gy.update(gy);
     gz = bq_gz.update(gz);
 
-    t_mpu = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_mpu = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // ----- Magnetometro (se habilitado) + Madgwick -----
     // Adafruit_MPU6050 retorna gyro em rad/s; Madgwick espera deg/s.
     if (USE_MAGNETOMETER) {
         read_QMC5883L(mx, my, mz);
-        t_mag = micros() - t_checkpoint;
-        t_checkpoint = micros();
+        t_mag = esp_timer_get_time() - t_checkpoint;
+        t_checkpoint = esp_timer_get_time();
         filter.update(gx * RAD_TO_DEG, gy * RAD_TO_DEG, gz * RAD_TO_DEG,
                       ax, ay, az, mx, my, mz);
     } else {
@@ -495,8 +533,8 @@ void loop(){
         filter.updateIMU(gx * RAD_TO_DEG, gy * RAD_TO_DEG, gz * RAD_TO_DEG,
                          ax, ay, az);
     }
-    t_filter = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_filter = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // ----- Angulos de Euler (yaw relativo ao initial_yaw, normalizado em [-π,π]) -----
     float roll  = filter.getRollRadians();
@@ -529,8 +567,8 @@ void loop(){
 
     float p = gx, q = gy, r = gz;
     float z_measurement[STATE_SIZE] = {roll, pitch, yaw, p, q, r};
-    t_angles = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_angles = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // ----- SDRE: publica estado para a task assincrona OU calcula sincronamente -----
     if (USE_ASYNC_SDRE) {
@@ -540,16 +578,16 @@ void loop(){
         state_shared[6] = omega_r;
         xSemaphoreGive(matricesMutex);
 
-        t_matrix = micros() - t_checkpoint;
-        t_checkpoint = micros();
+        t_matrix = esp_timer_get_time() - t_checkpoint;
+        t_checkpoint = esp_timer_get_time();
         t_lqr    = 0; // computado na SDRETask
     } else {
         // SINCRONO REORDENADO: o SDRE NAO roda aqui. Se rodasse, ficaria no caminho
         // sensor->atuador, somando ~4ms de atraso de transporte -> oscilacao. O controle
         // abaixo usa o K do ciclo ANTERIOR (ja em K_shared); o novo K e calculado ao FINAL
         // do loop (apos aplicar os motores), com latencia de atuacao ~0 (como no async).
-        t_matrix = micros() - t_checkpoint;
-        t_checkpoint = micros();
+        t_matrix = esp_timer_get_time() - t_checkpoint;
+        t_checkpoint = esp_timer_get_time();
         t_lqr = 0;
     }
 
@@ -575,8 +613,8 @@ void loop(){
 
         thrust = (remote_command.thrust / 65000.0f) * MAX_THRUST * 4.0f; // soma dos 4 motores
     }
-    t_control_logic = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_control_logic = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     float x[STATE_SIZE] = {roll, pitch, yaw, p, q, r};
     float ref[3]        = {phi_desired, theta_desired, yaw_desired};
@@ -613,8 +651,8 @@ void loop(){
     // Acoplamento giroscopico (Ir << I): sign_i = +1 CCW, -1 CW. Σ sign_i · ω_i.
     // M1 (FR, CW), M2 (RR, CCW), M3 (RL, CW), M4 (FL, CCW).
     omega_r = -sqrtf(w1_sq) + sqrtf(w2_sq) - sqrtf(w3_sq) + sqrtf(w4_sq);
-    t_motor_calc = micros() - t_checkpoint;
-    t_checkpoint = micros();
+    t_motor_calc = esp_timer_get_time() - t_checkpoint;
+    t_checkpoint = esp_timer_get_time();
 
     // ----- Aplica nos motores -----
     if (enable_motors && motors.isArmed()) {
@@ -622,23 +660,38 @@ void loop(){
     } else {
         motors.stopAllMotors();
     }
-    t_motor_set = micros() - t_checkpoint;
+    t_motor_set = esp_timer_get_time() - t_checkpoint;
 
     // ----- SINCRONO: calcula o SDRE para o PROXIMO ciclo, FORA do caminho de atuacao -----
     // Os motores ja foram aplicados acima com o K do ciclo anterior, entao o tempo da
     // Riccati (~3.7ms) nao atrasa a atuacao — mesmo padrao de latencia do async.
     // (Em sync a SDRETask nao existe, entao escreve K_shared direto sem mutex.)
     if (!USE_ASYNC_SDRE && CONTROLLER_TYPE == 0) {
-        unsigned long t_start = micros();
+        int64_t t_start = esp_timer_get_time();
         updateSystemMatrix(roll, pitch, yaw, p, q, r, omega_r);
-        sdre_t_updateMatrix = micros() - t_start;
+        sdre_t_updateMatrix = (unsigned long)(esp_timer_get_time() - t_start);
 
-        t_start = micros();
+        t_start = esp_timer_get_time();
         sdreController.computeGains();
         sdreController.exportGains(K_shared);
-        sdre_t_computeGains = micros() - t_start;
+        sdre_t_computeGains = (unsigned long)(esp_timer_get_time() - t_start);
         t_lqr = sdre_t_updateMatrix + sdre_t_computeGains;  // telemetria
+
+        // Desfecho/iteracoes desta chamada (Exp. E) — no async isto e escrito
+        // pela SDRETask; aqui o solver roda no proprio loop.
+        int last_it       = sdreController.getLastIterations();
+        sdre_last_iters   = (last_it < 0) ? 255 : (uint8_t)((last_it > 254) ? 254 : last_it);
+        sdre_last_outcome = (uint8_t)sdreController.getLastOutcome();
     }
+
+    // ----- Tempo do trabalho UTIL do ciclo (Exp. E) -----
+    // Medido do inicio do ciclo ate aqui: contem sensores, Madgwick, controle,
+    // mixer e — no modo sincrono — a Riccati; NAO contem o padding de periodo.
+    // E' ESTA a grandeza a reportar: loopTime, medido depois do busy-wait,
+    // satura no periodo e esconde a folga real. Medido antes da escrita de telemetria
+    // (~1 us de escritas em RAM) e do tratamento de comandos serial (que so roda
+    // desarmado e pode custar centenas de ms num dump CSV).
+    unsigned long processingTime = (unsigned long)(esp_timer_get_time() - startTime);
 
     // ----- Telemetria em RAM (somente quando armado, decimada por TELEMETRY_DECIMATION_CYCLES) -----
     // Custo: ~1 us — apenas escritas em RAM, sem printf nem I/O.
@@ -648,12 +701,19 @@ void loop(){
             // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
             // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
             // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
+            // t_lqr = 0 no modo async (a Riccati roda na SDRETask e por isso NAO
+            // esta contida em processingTime) — as duas colunas precisam ser lidas
+            // juntas, ver plano do Exp. E.
             telemetry.log(millis(),
                           roll, pitch, yaw,
                           -phi_desired, -theta_desired, -yaw_desired,
                           p, q, r,
                           u[0], u[1], u[2],
-                          w1_sq, w2_sq, w3_sq, w4_sq);
+                          w1_sq, w2_sq, w3_sq, w4_sq,
+                          (uint16_t)min<unsigned long>(processingTime, 65535UL),
+                          (uint16_t)min<unsigned long>(t_lqr, 65535UL),
+                          sdre_last_iters,
+                          sdre_last_outcome);
         }
         telemetry_cycle++;
     } else {
@@ -671,24 +731,33 @@ void loop(){
     }
 
     // ----- Mantem periodo de amostragem exato (5 ms) -----
-    unsigned long processingTime = micros() - startTime;
-
     if (processingTime < LOOP_PERIOD_US) {
         unsigned long timeLeft = LOOP_PERIOD_US - processingTime;
         // Cede CPU para SDRETask em granularidade de ms…
         vTaskDelay(timeLeft / 1000);
         // …e finaliza com busy-wait para o periodo exato em us.
-        while (micros() - startTime < LOOP_PERIOD_US) { /* spin */ }
+        while ((unsigned long)(esp_timer_get_time() - startTime) < LOOP_PERIOD_US) { /* spin */ }
+    } else {
+        // Estouro: o trabalho util passou do periodo, entao NAO ha padding e o
+        // ciclo dura mais que SAMPLING_TIME_S. Contado aqui (unico ponto em que
+        // o estouro e observavel) e reportado no DEBUG_MODE / plotter.
+        overrunCount++;
     }
 
-    unsigned long loopTime = micros() - startTime;
+    // Medido DEPOIS do padding: satura no periodo por construcao. Mantido apenas
+    // para as estatisticas de jitter/maximo historicas; a grandeza de interesse
+    // do Exp. E e processingTime.
+    unsigned long loopTime = (unsigned long)(esp_timer_get_time() - startTime);
 
     // ----- Estatisticas de timing -----
     static unsigned long maxTime = 0;
     static unsigned long totalTime = 0;
     static unsigned long loopCount = 0;
-    static unsigned long prev_ms = 0;
+    static int64_t       prev_ms = 0;
     static unsigned long last_print_time = 0; // custo dos prints do ultimo ciclo de debug
+    // Estatisticas do trabalho util (nao saturadas pelo padding) — Exp. E.
+    static unsigned long maxProcessingTime   = 0;
+    static uint64_t      totalProcessingTime = 0;
 
     bool skipThisSample = skip_timing_sample;
     if (skipThisSample) skip_timing_sample = false;
@@ -697,6 +766,8 @@ void loop(){
     if (!skipThisSample) {
         loopCount++;
         totalTime += loopTime;
+        totalProcessingTime += processingTime;
+        if (processingTime > maxProcessingTime) maxProcessingTime = processingTime;
         if (loopTime > maxTime) {
             maxTime = loopTime;
             newMaxTime = true;
@@ -704,6 +775,7 @@ void loop(){
     }
 
     float avgTime = (loopCount > 0) ? ((float)totalTime / loopCount) : 0.0f;
+    float avgProcessingTime = (loopCount > 0) ? ((float)totalProcessingTime / loopCount) : 0.0f;
     
     if (PRINT_TELEMETRY) {
         Serial.printf(">roll:%.2f\n>pitch:%.2f\n>yaw:%.2f\n>p:%.2f\n>q:%.2f\n>r:%.2f\n",
@@ -713,8 +785,8 @@ void loop(){
 
     if (DEBUG_MODE) {
         // ===== MODO DEBUG: Prints detalhados a cada 1 segundo =====
-        if (micros() >= prev_ms + 1000000) {
-            unsigned long print_start = micros();
+        if (esp_timer_get_time() >= prev_ms + 1000000) {
+            int64_t print_start = esp_timer_get_time();
             
             // Calcula tempo total do loop incluindo prints anteriores
             unsigned long total_with_prints = processingTime + last_print_time;
@@ -746,8 +818,15 @@ void loop(){
             
             // Tempo de execução
             Serial.println("\n📊 ESTATÍSTICAS DE TEMPO:");
-            Serial.printf("   Tempo_Loop: %lu μs\n", loopTime);
             Serial.printf("   Tempo_Processamento: %lu μs\n", processingTime);
+            Serial.printf("   Processamento_Maximo: %lu μs\n", maxProcessingTime);
+            Serial.printf("   Processamento_Medio: %.2f μs\n", avgProcessingTime);
+            Serial.printf("   Overrun_Count: %lu de %lu ciclos (%.3f%%)\n",
+                          (unsigned long)overrunCount, loopCount,
+                          (loopCount > 0) ? (100.0f * overrunCount / loopCount) : 0.0f);
+            // loopTime/maxTime/avgTime saturam no periodo (medidos apos o padding)
+            // — servem so como sanidade do periodo, nao como custo do ciclo.
+            Serial.printf("   Tempo_Loop: %lu μs\n", loopTime);
             Serial.printf("   Tempo_Maximo: %lu μs\n", maxTime);
             Serial.printf("   Tempo_Medio: %.2f μs\n", avgTime);
 
@@ -755,6 +834,8 @@ void loop(){
                 Serial.println("\n⚙️  SDRE TASK (fora do loop de 5ms):");
                 Serial.printf("   updateSystemMatrix: %4lu μs\n", sdre_t_updateMatrix);
                 Serial.printf("   computeGains (DARE): %4lu μs\n", sdre_t_computeGains);
+                Serial.printf("   Iteracoes: %u | Desfecho: %u (0=converged 1=budget 2=breakdown)\n",
+                              (unsigned)sdre_last_iters, (unsigned)sdre_last_outcome);
                 Serial.printf("   Total SDRE:          %4lu μs  (rodando a ~20 Hz em task separada)\n", sdre_t_total);
             }
             
@@ -880,22 +961,26 @@ void loop(){
             Serial.println("========================================\n");
             
             // Mede o tempo que os prints custaram
-            last_print_time = micros() - print_start;
+            last_print_time = esp_timer_get_time() - print_start;
             Serial.printf("⏱️  Tempo dos Prints: %lu μs\n", last_print_time);
             Serial.printf("========================================\n");        
 
             
-            prev_ms = micros();
+            prev_ms = esp_timer_get_time();
         }
     } else {
         // ===== MODO SERIAL PLOTTER: Printa apenas quando há novo máximo =====
+        // Reporta o trabalho util (processingTime), nao loopTime — este ultimo e
+        // medido depois do busy-wait de padding e satura no periodo.
         if (newMaxTime) {
             Serial.print("Atual:");
-            Serial.print(loopTime);
+            Serial.print(processingTime);
             Serial.print(",Media:");
-            Serial.print(avgTime, 1);
+            Serial.print(avgProcessingTime, 1);
             Serial.print(",Max:");
-            Serial.println(maxTime);
+            Serial.print(maxProcessingTime);
+            Serial.print(",Overrun:");
+            Serial.println((unsigned long)overrunCount);
         }
     }
 }
