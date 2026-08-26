@@ -7,6 +7,24 @@
 class AutoLQR : public MatrixOperations {
 public:
     /**
+     * @brief Desfecho de uma chamada a computeGains(), distinto de "sucesso/falha" binário.
+     *
+     * A campanha original do CBA 2026 e a primeira versão do artigo DINAME tratavam
+     * "não convergiu em maxIterations" (Budget) e "overflow/pivô singular" (Breakdown)
+     * como a mesma coisa — "falha" — o que inflava artificialmente a contagem de falhas
+     * do método iterativo (ver docs/auditoria_solvers_riccati.md, Seção 13): ele não
+     * diverge, apenas precisa de muito mais iterações do que o orçamento fixo de 100
+     * permitia (ρ de malha fechada com mediana 0,9904 exige ~358-717 iterações para
+     * tolerância 1e-3/1e-6, contra as 100 disponíveis). Manter os três desfechos
+     * separados evita repetir esse erro.
+     */
+    enum class SolveOutcome {
+        Converged, ///< Atingiu a tolerância dentro do orçamento de iterações.
+        Budget,    ///< Esgotou maxIterations sem atingir a tolerância — NÃO é falha numérica.
+        Breakdown  ///< Overflow, saturação ou matriz singular/quase-singular — falha real.
+    };
+
+    /**
      * @brief Construct a new AutoLQR controller
      * @param stateSize Number of state variables
      * @param controlSize Number of control inputs
@@ -45,6 +63,47 @@ public:
      * @return true if successful, false if computation fails
      */
     bool computeGains(const char* method = "SDA_FIXED");
+
+    /**
+     * @brief Define o critério de parada usado por TODOS os métodos iterativos
+     *        (float e _FIXED), para permitir uma comparação em que a única
+     *        variável entre as duas aritméticas seja a aritmética em si.
+     *
+     * Antes desta função existir, o caminho float usava norma de Frobenius
+     * relativa (tolerância 1e-6, orçamento 100 iterações fixos no código) e o
+     * caminho fixed-point usava norma máx-abs relativa (tolerância 1e-3,
+     * orçamento 25) — três ordens de grandeza de diferença de tolerância e
+     * normas distintas, além de orçamentos diferentes (ver
+     * docs/auditoria_solvers_riccati.md, Seção 13). Agora ambos os caminhos
+     * usam a MESMA norma — Frobenius relativa, ‖H_{k+1}-H_k‖_F/‖H_k‖_F, por
+     * decisão explícita do usuário (Seção 14) — e os mesmos relTol/maxIters,
+     * passados aqui. No caminho fixed-point a soma de quadrados é calculada
+     * em float a partir dos valores Q13.18 convertidos (ver FixedPointQ.cpp),
+     * não em inteiro — evita estourar int64 e o custo é desprezível frente
+     * às matmuls da iteração.
+     *
+     * @param relTol Tolerância relativa: ‖H_{k+1}-H_k‖_F / ‖H_k‖_F < relTol.
+     * @param maxIters Orçamento de iterações. Ao esgotar sem convergir, o
+     *        desfecho é SolveOutcome::Budget (não Breakdown) — ver getLastOutcome().
+     */
+    void setStoppingCriterion(float relTol, int maxIters);
+
+    /**
+     * @brief Desfecho da última chamada a computeGains() — ver SolveOutcome.
+     */
+    SolveOutcome getLastOutcome() const;
+
+    /**
+     * @brief Ajusta o parâmetro de shift γ usado por computeGainMatrixSDA_SS()
+     *        e computeGainMatrixSDA_SS_Fixed() (pencil simplético deslocado,
+     *        Chu, Fan & Lin 2005). Default 0.5. Exposto como setter (em vez de
+     *        constante fixa) apenas para permitir a varredura de γ em
+     *        test/gamma_sweep.cpp sem recompilar; não há laço de auto-tuning
+     *        em tempo real.
+     * @param gamma Valor em (0,1). Fora desse intervalo, ignorado (mantém o
+     *        valor corrente).
+     */
+    void setSDASSGamma(float gamma);
 
     /**
      * @brief Update the controller with current state
@@ -183,6 +242,13 @@ private:
     float* Kr; ///< Kr gain matrix
     float* reference; ///< To store reference values
     
+    float relTolerance;   ///< Tolerância relativa corrente (ver setStoppingCriterion()). Default 1e-3.
+    int maxIterations;    ///< Orçamento de iterações corrente (ver setStoppingCriterion()). Default 100.
+    int invRelTolerance;  ///< round(1/relTolerance), pré-calculado p/ os métodos _FIXED (evita
+                           ///< divisão por chamada no laço quente; recalculado em setStoppingCriterion()).
+    SolveOutcome lastOutcome; ///< Desfecho da última chamada a computeGains() (ver getLastOutcome()).
+    float ssGamma;         ///< Shift γ do SDA-SS (ver setSDASSGamma()). Default 0.5.
+
     int lastIterations; ///< Number of iterations in last computation
     mutable float lastResidual; ///< Resíduo REAL da DARE (ver getLastResidual()) — cache preguiçoso
     mutable bool residualDirty; ///< true = lastResidual precisa ser recalculado na próxima

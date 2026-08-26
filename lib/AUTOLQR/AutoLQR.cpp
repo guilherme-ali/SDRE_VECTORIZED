@@ -19,6 +19,11 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
     , P_warm(nullptr)
     , Kr(nullptr)
     , reference(nullptr)
+    , relTolerance(1e-3f)
+    , maxIterations(100)
+    , invRelTolerance(1000) // round(1/1e-3) — mantém em sincronia com relTolerance acima
+    , lastOutcome(SolveOutcome::Converged)
+    , ssGamma(0.7f) // medido, nao suposto — ver comentario em computeGainMatrixSDA_SS()
     , lastIterations(-1)
     , lastResidual(-1.0f)
     , residualDirty(false)
@@ -91,10 +96,47 @@ void AutoLQR::setGains(const float* inputK)
     matrixCopy(inputK, K, controlSize * stateSize);
 }
 
+void AutoLQR::setStoppingCriterion(float relTol, int maxIters)
+{
+    if (relTol > 0.0f) {
+        relTolerance = relTol;
+        long r = lroundf(1.0f / relTol);
+        invRelTolerance = (r < 1) ? 1 : (int)r; // ver FixedPointQ.cpp:doubling_loop_q
+    }
+    if (maxIters > 0) maxIterations = maxIters;
+}
+
+AutoLQR::SolveOutcome AutoLQR::getLastOutcome() const
+{
+    return lastOutcome;
+}
+
+void AutoLQR::setSDASSGamma(float gamma)
+{
+    if (gamma > 0.0f && gamma < 1.0f) ssGamma = gamma;
+}
+
 bool AutoLQR::computeGains(const char* method)
 {
     bool K_flag = false;
-    
+
+    // Reset p/ sentinelas ANTES do despacho — Seção 15 da auditoria, "Achado 3":
+    // lastIterations/lastResidual/lastFixedPointMaxAbsSeen só eram escritos no
+    // caminho de sucesso de cada método _FIXED; todo `return false` antecipado
+    // os deixava com o valor da chamada anterior (mesma instância persistente).
+    // lastOutcome tinha o mesmo problema em SCHUR/VAN_DOOREN, que nunca o
+    // tocam (nem sequer foram retrofitados com a taxonomia SolveOutcome) —
+    // getLastOutcome() após um deles reportava o desfecho de uma chamada
+    // anterior não relacionada. lastOutcome é reforçado para Converged logo
+    // após o despacho quando K_flag==true (linha abaixo), o que é redundante
+    // para os métodos que já se auto-reportam corretamente e CORRIGE
+    // SCHUR/VAN_DOOREN de graça.
+    lastIterations = -1;
+    lastResidual = -1.0f;
+    residualDirty = false;
+    lastFixedPointMaxAbsSeen = 0.0f;
+    lastOutcome = SolveOutcome::Breakdown; // sentinela: "método não se reportou"
+
     if (strcmp(method, "SDA") == 0) {
         K_flag = computeGainMatrixSDA(); 
     } else if (strcmp(method, "SDA_FIXED") == 0) {
@@ -133,6 +175,11 @@ bool AutoLQR::computeGains(const char* method)
 
     if (!K_flag)
         return false;
+
+    // Sucesso: reforça Converged mesmo para métodos que não usam a taxonomia
+    // (SCHUR, VAN_DOOREN — solvers diretos, sem noção de "orçamento
+    // esgotado"). No-op para os métodos que já se auto-reportam.
+    lastOutcome = SolveOutcome::Converged;
 
     // computeGainMatrixKr() só formata Kr a partir de K já calculado — seu
     // retorno não deve mascarar o sucesso/falha do cálculo do ganho principal.
@@ -215,39 +262,61 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;     // entrada já fora do range ±8192 → fallback
+    // BUG CORRIGIDO 2026-08-18: esta era a ÚNICA saída por overflow em todo o
+    // arquivo sem marcar lastOutcome (as equivalentes estão em :241 e nos quatro
+    // outros métodos _FIXED). Como lastOutcome é membro persistente e
+    // computeGains() não o reseta, este return devolvia o desfecho da chamada
+    // ANTERIOR — junto com lastIterations/lastResidual/lastFixedPointMaxAbsSeen,
+    // igualmente não tocados. Efeito medido na varredura Q/R: em R_scale>=1e3,
+    // onde Rd satura o teto ±8192 já aqui na conversão da entrada, as 6000
+    // execuções do SDA_FIXED reportaram telemetria congelada e idêntica
+    // (iters=15, resid=8.520439e-03, outcome=0) em ~170 µs, produzindo a
+    // conclusão FALSA de que o SDA_FIXED seria imune ao modo de falha em R
+    // grande. Todos os cinco métodos _FIXED abortam aqui, identicamente.
+    // Ver docs/auditoria_solvers_riccati.md, Seção 15.
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; } // entrada fora do range ±8192
 
     q_t BT[18], Rinv[9], BRi[18], Gk[36], Hk[36], Ak[36];
     transpose_q(Bq, BT, n, m);
-    if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+    if (!invert_q(Rq, Rinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
     matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
     matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
     memcpy(Hk, Qq, sizeof(Hk));
     memcpy(Ak, Aq, sizeof(Ak));
 
-    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
-        return false;              // singular no domínio fixed-point → fallback
-    if (st.overflow) return false; // saturou durante o laço → fallback
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, maxIterations, invRelTolerance, nullptr, &st)) {
+        lastOutcome = SolveOutcome::Breakdown; return false; // singular no domínio fixed-point → fallback
+    }
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; } // saturou durante o laço → fallback
 
     // K = (R + B'PB)^-1 B'PA, com A ORIGINAL (Aq), não Ak (mutado pelo laço)
     q_t BTP[18], BTPB[9], Rp[9], BTPA[18], Kq[18];
     matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
     matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
     add_q(Rq, BTPB, Rp, m * m);
-    if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+    if (!invert_q(Rp, Rp, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
     matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
     matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    // doubling_loop_q não retorna false por esgotar o orçamento (só por
+    // singularidade — ver FixedPointQ.cpp), então st.iterations==maxIterations
+    // sem overflow é censura por orçamento (Budget), não convergência. Antes
+    // desta mudança, computeGains() dos métodos _FIXED retornava sempre true
+    // aqui — inflava artificialmente "0 falhas" em execuções censuradas por
+    // orçamento (ver docs/auditoria_solvers_riccati.md, Seção 13). Agora o
+    // retorno booleano tem o MESMO significado nos dois caminhos: true só
+    // quando SolveOutcome::Converged.
+    lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0; // kernel fixed-point não expõe resíduo por iteração
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true; // resíduo real calculado sob demanda em getLastResidual()
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 // Resíduo REAL da DARE para o (A,B,Q,R,P) atuais — independente do critério
@@ -376,9 +445,8 @@ bool AutoLQR::computeGainMatrixSDA()
     // ========================================================================
     // LOOP SDA
     // ========================================================================
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
 
     // Inicializar histórico de resíduos
@@ -395,6 +463,7 @@ bool AutoLQR::computeGainMatrixSDA()
 
         matrixCopy(Temp1, W, stateSize * stateSize);
         if (!invertMatrix(W, W, stateSize)) {
+            breakdown = true;
             break;
         }
 
@@ -416,7 +485,10 @@ bool AutoLQR::computeGainMatrixSDA()
         matrixMultiplySymOutput(AT, Temp3, Temp2, stateSize);
         matrixAdd(Hk, Temp2, Hk_next, stateSize, stateSize);
 
-        // Verificar convergência usando norma Frobenius relativa
+        // Critério de parada: norma de Frobenius relativa (unificado com o
+        // caminho fixed-point via cálculo em float — ver setStoppingCriterion()
+        // e FixedPointQ.cpp — por pedido explícito do usuário; ver
+        // docs/auditoria_solvers_riccati.md, Seção 13).
         float diff = 0.0f;
         float norm_Hk = 0.0f;
         for (int i = 0; i < stateSize * stateSize; i++) {
@@ -427,7 +499,6 @@ bool AutoLQR::computeGainMatrixSDA()
         diff = sqrtf(diff);
         norm_Hk = sqrtf(norm_Hk);
 
-        // Resíduo relativo (como nos outros métodos)
         rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
 
         // Armazenar resíduo no histórico (primeiras 10 iterações)
@@ -441,10 +512,11 @@ bool AutoLQR::computeGainMatrixSDA()
         matrixCopy(Gk_next, Gk, stateSize * stateSize);
         matrixCopy(Hk_next, Hk, stateSize * stateSize);
 
-        if (rel_diff < tolerance) {
+        if (rel_diff < relTolerance) {
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastOutcome = SolveOutcome::Converged;
             break;
         }
     }
@@ -452,6 +524,7 @@ bool AutoLQR::computeGainMatrixSDA()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff; // último valor calculado dentro do loop (Hk já foi sobrescrito)
+        lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
     // P = Hk (solução final)
@@ -479,6 +552,7 @@ bool AutoLQR::computeGainMatrixSDA()
     // Inverter
     if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, controlSize)) {
         converged = false;
+        lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K
     } else {
         // BT_P_A = (B'·P)·A
         matrixMultiply(BT_P, A, BT_P_A, controlSize, stateSize, stateSize);
@@ -1183,9 +1257,8 @@ bool AutoLQR::computeGainMatrixIterative()
     transposeMatrix(A, AT, n, n);
     transposeMatrix(B, BT, n, m);
 
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
 
     // Inicializar histórico de resíduos
@@ -1213,6 +1286,7 @@ bool AutoLQR::computeGainMatrixIterative()
 
         matrixCopy(S, S_inv, mm);
         if (!invertMatrix(S_inv, S_inv, m)) {
+            breakdown = true;
             break;
         }
 
@@ -1220,6 +1294,8 @@ bool AutoLQR::computeGainMatrixIterative()
         matrixMultiply(AT, PB, ATPB, n, n, m);
         matrixMultiply(ATPB, K_temp, correction, n, m, n);
 
+        // Critério de parada: norma de Frobenius relativa — ver comentário
+        // equivalente em computeGainMatrixSDA().
         float diff = 0.0f;
         float P_norm = 0.0f;
 
@@ -1251,10 +1327,11 @@ bool AutoLQR::computeGainMatrixIterative()
             residualHistoryCount = iter + 1;
         }
 
-        if (rel_diff < tolerance) {
+        if (rel_diff < relTolerance) {
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastOutcome = SolveOutcome::Converged;
             break;
         }
     }
@@ -1262,6 +1339,7 @@ bool AutoLQR::computeGainMatrixIterative()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff; // último valor calculado dentro do loop
+        lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
     // ================================================================
@@ -1282,6 +1360,8 @@ bool AutoLQR::computeGainMatrixIterative()
         matrixMultiply(S_inv, BTPA, K, m, m, n);
     } else {
         converged = false;
+        lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K,
+                                                // mesmo que o loop de convergência tenha OK'ado
     }
 
     // Publica o resultado no P genérico (getRicattiSolution) e no buffer de
@@ -1326,17 +1406,39 @@ bool AutoLQR::computeGainMatrixIterative()
 // os AUTOVETORES (e portanto o subespaço deflacionário e P). Reduzindo (M',L')
 // de volta à forma SSF por eliminação em bloco (invertendo o pencil 2n×2n
 // N1=[[I-γA,-γG],[γH,I-γA^T]]) obtém-se (Â,Ĝ,Ĥ) tal que o SDA padrão aplicado
-// a eles converge para o MESMO P da DARE original — verificado numericamente
-// em outputs/verify_float64_mirror.csv (erro vs. scipy ~1e-14 para γ∈{0.1..0.99}
-// em sistemas aleatórios e no caso de hover real, com ganho de até ~2x menos
-// iterações quando o autovalor dominante está perto do círculo unitário).
+// a eles converge para o MESMO P da DARE original — a correção algébrica em
+// si foi verificada numericamente em outputs/verify_float64_mirror.csv
+// (erro vs. scipy ~1e-14), mas ESSE arquivo não contém uma varredura de γ.
 //
-// γ=0.5 é usado como padrão fixo (testado sempre ajuda ou é neutro). O paper
-// que fundamenta a técnica de shift para SDA simétrico, Chu, Fan & Lin (2005),
-// Linear Algebra Appl. 396:55-80, propõe uma busca de Fibonacci para o γ
-// ótimo; essa busca NÃO foi implementada aqui (ver docs/auditoria_solvers_riccati.md,
-// registrado como trabalho futuro) — o valor fixo já corrige o bug algébrico,
-// que era o problema crítico.
+// CORRIGIDO 2026-08-18 (ver docs/auditoria_solvers_riccati.md, Seção 15): esta
+// nota afirmava anteriormente uma varredura γ∈{0.1..0.99} com "~2x menos
+// iterações" que este arquivo não continha — não existia medição nenhuma,
+// γ=0.5 era só o ponto médio de (0,1).
+//
+// MEDIDO em test/gamma_sweep.cpp (Exp. 3), τ=1e-3/200 iters (critério
+// casado), 4 trajetórias × 300 pts, γ∈{0.1,0.3,0.5,0.7,0.9}, 1216 pontos por
+// γ, 100% convergência em todos:
+//
+//   γ    iters   SDA_SS(us)  resid_f      SDA_SS_FIXED(us)  resid_fx
+//   0.1   9      11340.6     3.669e-06    4466.1             1.438e-02
+//   0.3   9      11356.8     2.382e-06    4501.6             1.321e-02
+//   0.5   8      10360.0     1.356e-06    4168.9              9.759e-03
+//   0.7   7       9358.5     1.153e-06    3829.8              8.992e-03
+//   0.9   5       7357.3     1.664e-06    3133.7              1.509e-02
+//
+// γ=0.7 DOMINA o antigo padrão γ=0.5 nas duas aritméticas — 12,5% mais
+// rápido E resíduo melhor (float 15% menor, fixed 8% menor). γ=0.9 é ainda
+// mais rápido, mas o resíduo fixed-point piora 68% vs. γ=0.7 (1.509e-2
+// contra 8.992e-3) — mais iterações "economizadas" viram mais ruído de
+// quantização acumulado por passo maior, não menos. Não há dominância aí:
+// é troca de velocidade por acurácia, então γ=0.7 foi adotado como novo
+// padrão em vez do extremo mais rápido. O paper que fundamenta a técnica de
+// shift, Chu, Fan & Lin (2005), Linear Algebra Appl. 396:55-80, propõe uma
+// busca de Fibonacci para o γ ótimo (minimiza o raio espectral dos
+// autovalores transformados); essa busca fina NÃO foi implementada aqui —
+// a grade grosseira de 5 pontos acima já basta para descartar o ponto médio
+// não-justificado e substituí-lo por um valor medido. γ é exposto via
+// setSDASSGamma() caso se queira refinar essa busca sem recompilar.
 // ============================================================================
 bool AutoLQR::computeGainMatrixSDA_SS()
 {
@@ -1352,11 +1454,10 @@ bool AutoLQR::computeGainMatrixSDA_SS()
     const int nn = n * n;
     const int mm = m * m;
     const int n2 = 2 * n;
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
 
-    const float gamma = 0.5f;
+    const float gamma = ssGamma; // shift ajustável (setSDASSGamma), default 0.5 — ver Exp. 3
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f;
 
     float* R_inv = new float[mm]();
@@ -1467,7 +1568,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
         for (int i = 0; i < n; i++) Temp1[i * n + i] += 1.0f;
 
         matrixCopy(Temp1, W, nn);
-        if (!invertMatrix(W, W, n)) break;
+        if (!invertMatrix(W, W, n)) { breakdown = true; break; }
 
         matrixMultiply(Ak, W, Temp1, n, n, n);
         matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
@@ -1482,6 +1583,8 @@ bool AutoLQR::computeGainMatrixSDA_SS()
         matrixMultiply(AT, Temp3, Temp2, n, n, n);
         matrixAdd(Hk, Temp2, Hk_next, n, n);
 
+        // Critério de parada: norma de Frobenius relativa — ver
+        // comentário equivalente em computeGainMatrixSDA().
         float diff = 0.0f, norm_Hk = 0.0f;
         for (int i = 0; i < nn; i++) {
             float d = Hk_next[i] - Hk[i];
@@ -1501,10 +1604,11 @@ bool AutoLQR::computeGainMatrixSDA_SS()
         matrixCopy(Gk_next, Gk, nn);
         matrixCopy(Hk_next, Hk, nn);
 
-        if (rel_diff < tolerance) {
+        if (rel_diff < relTolerance) {
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastOutcome = SolveOutcome::Converged;
             break;
         }
     }
@@ -1512,6 +1616,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff;
+        lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
     matrixCopy(Hk, P, nn);
@@ -1536,6 +1641,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
 
         if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
             converged = false;
+            lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K
         } else {
             matrixMultiply(BT_P, A, BT_P_A, m, n, n);
             matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
@@ -1583,9 +1689,8 @@ bool AutoLQR::computeGainMatrixASDA()
     const int m = controlSize;
     const int nn = n * n;
     const int mm = m * m;
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f;
     float cum_s = 1.0f; // produto acumulado dos fatores de escala (para desfazer em P)
 
@@ -1678,6 +1783,7 @@ bool AutoLQR::computeGainMatrixASDA()
 
             matrixCopy(Temp1, W, nn);
             if (!invertMatrix(W, W, n)) {
+                breakdown = true;
                 break;
             }
 
@@ -1694,17 +1800,20 @@ bool AutoLQR::computeGainMatrixASDA()
             matrixMultiply(AT, Temp3, Temp2, n, n, n);
             matrixAdd(Hk, Temp2, Hk_next, n, n);
 
-            float diff = 0.0f;
-            float norm_H_new = 0.0f;
+            // Critério de parada: norma de Frobenius relativa — ver
+            // comentário equivalente em computeGainMatrixSDA(). Nomes
+            // diff_conv/norm_Hk_conv (não diff/norm_Hk) para não colidir
+            // com norm_Gk/norm_Hk do reescalonamento adaptativo (ASDA),
+            // mesmo escopo do laço.
+            float diff_conv = 0.0f, norm_Hk_conv = 0.0f;
             for (int i = 0; i < nn; i++) {
                 float d = Hk_next[i] - Hk[i];
-                diff += d * d;
-                norm_H_new += Hk_next[i] * Hk_next[i];
+                diff_conv += d * d;
+                norm_Hk_conv += Hk[i] * Hk[i];
             }
-            diff = sqrtf(diff);
-            norm_H_new = sqrtf(norm_H_new);
-
-            rel_diff = (norm_H_new > 1e-10f) ? (diff / norm_H_new) : diff;
+            diff_conv = sqrtf(diff_conv);
+            norm_Hk_conv = sqrtf(norm_Hk_conv);
+            rel_diff = (norm_Hk_conv > 1e-10f) ? (diff_conv / norm_Hk_conv) : diff_conv;
 
             // Armazenar resíduo no histórico (primeiras 10 iterações)
             if (iter < 10) {
@@ -1716,10 +1825,11 @@ bool AutoLQR::computeGainMatrixASDA()
             matrixCopy(Gk_next, Gk, nn);
             matrixCopy(Hk_next, Hk, nn);
 
-            if (rel_diff < tolerance) {
+            if (rel_diff < relTolerance) {
                 converged = true;
                 lastIterations = iter + 1;
                 lastStepDelta = rel_diff;
+                lastOutcome = SolveOutcome::Converged;
                 break;
             }
         }
@@ -1727,6 +1837,7 @@ bool AutoLQR::computeGainMatrixASDA()
         if (!converged) {
             lastIterations = maxIterations;
             lastStepDelta = rel_diff;
+            lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
         }
 
         // P = Hk · cum_s (desfaz o escalonamento acumulado — ver comentário acima)
@@ -1755,6 +1866,7 @@ bool AutoLQR::computeGainMatrixASDA()
 
         if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
             converged = false;
+            lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K
         } else {
             matrixMultiply(BT_P, A, BT_P_A, m, n, n);
             matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
@@ -1803,20 +1915,19 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
     const int m = controlSize;
     const int nn = n * n;
     const int mm = m * m;
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f;
 
     // Alocação de memória
     float* Ak = new float[nn]();
     float* Gk = new float[nn]();
     float* Hk = new float[nn]();
-    
+
     float* Ak_next = new float[nn]();
     float* Gk_next = new float[nn]();
     float* Hk_next = new float[nn]();
-    
+
     float* R_inv = new float[mm]();
     float* BT = new float[m * n]();
     float* AT = new float[nn]();
@@ -1824,7 +1935,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
     float* Temp1 = new float[nn]();
     float* Temp2 = new float[nn]();
     float* Temp3 = new float[nn]();
-    
+
     // Matrizes de escalonamento
     float* D = new float[n]();
     float* Dinv = new float[n]();
@@ -1899,48 +2010,53 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
             
             matrixCopy(Temp1, W, nn);
             if (!invertMatrix(W, W, n)) {
+                breakdown = true;
                 break;
             }
-            
+
             matrixMultiply(Ak, W, Temp1, n, n, n);
             matrixMultiply(Temp1, Ak, Ak_next, n, n, n);
-            
+
             transposeMatrix(Ak, AT, n, n);
             matrixMultiply(Gk, AT, Temp2, n, n, n);
             matrixMultiply(Temp1, Temp2, Temp3, n, n, n);
             matrixAdd(Gk, Temp3, Gk_next, n, n);
-            
+
             matrixMultiply(W, Ak, Temp2, n, n, n);
             matrixMultiply(Hk, Temp2, Temp3, n, n, n);
             matrixMultiply(AT, Temp3, Temp2, n, n, n);
             matrixAdd(Hk, Temp2, Hk_next, n, n);
-            
-            float diff = 0.0f;
-            float norm_H = 0.0f;
+
+            // Critério de parada: norma de Frobenius relativa — ver
+            // comentário equivalente em computeGainMatrixSDA(). Nomes
+            // diff_conv/norm_Hk_conv (não diff/norm_Hk) para não colidir
+            // com norm_Gk/norm_Hk do reescalonamento adaptativo (ASDA),
+            // mesmo escopo do laço.
+            float diff_conv = 0.0f, norm_Hk_conv = 0.0f;
             for (int i = 0; i < nn; i++) {
                 float d = Hk_next[i] - Hk[i];
-                diff += d * d;
-                norm_H += Hk_next[i] * Hk_next[i];
+                diff_conv += d * d;
+                norm_Hk_conv += Hk[i] * Hk[i];
             }
-            diff = sqrtf(diff);
-            norm_H = sqrtf(norm_H);
-
-            rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
+            diff_conv = sqrtf(diff_conv);
+            norm_Hk_conv = sqrtf(norm_Hk_conv);
+            rel_diff = (norm_Hk_conv > 1e-10f) ? (diff_conv / norm_Hk_conv) : diff_conv;
 
             // Armazenar resíduo no histórico (primeiras 10 iterações)
             if (iter < 10) {
                 residualHistory[iter] = rel_diff;
                 residualHistoryCount = iter + 1;
             }
-            
+
             matrixCopy(Ak_next, Ak, nn);
             matrixCopy(Gk_next, Gk, nn);
             matrixCopy(Hk_next, Hk, nn);
-            
-            if (rel_diff < tolerance) {
+
+            if (rel_diff < relTolerance) {
                 converged = true;
                 lastIterations = iter + 1;
                 lastStepDelta = rel_diff;
+                lastOutcome = SolveOutcome::Converged;
                 break;
             }
         }
@@ -1948,6 +2064,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         if (!converged) {
             lastIterations = maxIterations;
             lastStepDelta = rel_diff;
+            lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
         }
 
         // Recuperar P original: P = D * P_scaled * D
@@ -1978,11 +2095,12 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         
         if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
             converged = false;
+            lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K
         } else {
             matrixMultiply(BT_P, A, BT_P_A, m, n, n);
             matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
         }
-        
+
         delete[] BT_P;
         delete[] BT_P_B;
         delete[] BT_P_A;
@@ -2080,9 +2198,8 @@ bool AutoLQR::computeGainMatrixADDA()
     // 5. Hk = Q
     matrixCopy(Q, Hk, nn);
 
-    const int maxIterations = 100;
-    const float tolerance = 1e-6f;
     bool converged = false;
+    bool breakdown = false;
     float rel_diff = 1.0f;
 
     residualHistoryCount = 0;
@@ -2096,6 +2213,7 @@ bool AutoLQR::computeGainMatrixADDA()
         }
         matrixCopy(Temp1, V, nn);
         if (!invertMatrix(V, V, n)) {
+            breakdown = true;
             break;
         }
 
@@ -2116,18 +2234,17 @@ bool AutoLQR::computeGainMatrixADDA()
         matrixMultiply(AT, Temp3, Temp2, n, n, n);
         matrixAdd(Hk, Temp2, Hk_next, n, n);
 
-        // Verificar convergência usando norma de Frobenius relativa
-        float diff = 0.0f;
-        float norm_H = 0.0f;
+        // Critério de parada: norma de Frobenius relativa — ver
+        // comentário equivalente em computeGainMatrixSDA().
+        float diff = 0.0f, norm_Hk = 0.0f;
         for (int i = 0; i < nn; i++) {
             float d = Hk_next[i] - Hk[i];
             diff += d * d;
-            norm_H += Hk[i] * Hk[i];
+            norm_Hk += Hk[i] * Hk[i];
         }
         diff = sqrtf(diff);
-        norm_H = sqrtf(norm_H);
-
-        rel_diff = (norm_H > 1e-10f) ? (diff / norm_H) : diff;
+        norm_Hk = sqrtf(norm_Hk);
+        rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
 
         if (iter < 10) {
             residualHistory[iter] = rel_diff;
@@ -2138,10 +2255,11 @@ bool AutoLQR::computeGainMatrixADDA()
         matrixCopy(Gk_next, Gk, nn);
         matrixCopy(Hk_next, Hk, nn);
 
-        if (rel_diff < tolerance) {
+        if (rel_diff < relTolerance) {
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastOutcome = SolveOutcome::Converged;
             break;
         }
     }
@@ -2149,6 +2267,7 @@ bool AutoLQR::computeGainMatrixADDA()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff;
+        lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
     // P = Hk (solução final)
@@ -2175,6 +2294,7 @@ bool AutoLQR::computeGainMatrixADDA()
 
     if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, m)) {
         converged = false;
+        lastOutcome = SolveOutcome::Breakdown; // (R+B'PB) singular no cálculo final de K
     } else {
         matrixMultiply(BT_P, A, BT_P_A, m, n, n);
         matrixMultiply(R_plus_BTPB, BT_P_A, K, m, m, n);
@@ -2218,23 +2338,24 @@ bool AutoLQR::computeGainMatrixADDA_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t BT[18], Gk[36], Hk[36], Ak[36];
     transpose_q(Bq, BT, n, m);
     {
         q_t Rinv[9], BRi[18];
-        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        if (!invert_q(Rq, Rinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
         matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
     }
     memcpy(Hk, Qq, sizeof(Hk));
     memcpy(Ak, Aq, sizeof(Ak));
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
-    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AlternatingVW, 25, 1000, nullptr, &st))
-        return false;
-    if (st.overflow) return false;
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AlternatingVW, maxIterations, invRelTolerance, nullptr, &st)) {
+        lastOutcome = SolveOutcome::Breakdown; return false;
+    }
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t Kq[18];
     {
@@ -2242,21 +2363,22 @@ bool AutoLQR::computeGainMatrixADDA_Fixed()
         matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
         matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
         add_q(Rq, BTPB, Rp, m * m);
-        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        if (!invert_q(Rp, Rp, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
         matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true;
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 bool AutoLQR::computeGainMatrixASDA_Fixed()
@@ -2274,27 +2396,28 @@ bool AutoLQR::computeGainMatrixASDA_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t BT[18], Gk[36], Hk[36], Ak[36];
     transpose_q(Bq, BT, n, m);
     {
         q_t Rinv[9], BRi[18];
-        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        if (!invert_q(Rq, Rinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
         matmul_q(BRi, BT, Gk, n, m, n, sh, &st);
     }
     memcpy(Hk, Qq, sizeof(Hk));
     memcpy(Ak, Aq, sizeof(Ak));
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     // Rescale (G,H)->(sG,H/s) acontece a cada iteração dentro do laço
     // (inclusive a primeira — equivalente ao s0 inicial + iteração 0
     // redundante do par float, ver docs/auditoria_solvers_riccati.md).
     float cum_s = 1.0f;
-    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AdaptiveScaling, 25, 1000, &cum_s, &st))
-        return false;
-    if (st.overflow) return false;
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::AdaptiveScaling, maxIterations, invRelTolerance, &cum_s, &st)) {
+        lastOutcome = SolveOutcome::Breakdown; return false;
+    }
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     // P = H_final * cum_s — desfeito fora do laço em float (cum_s é produto
     // de ~10 fatores em [0,1;10], não cabe garantido em Q13.18) — depois
@@ -2304,7 +2427,7 @@ bool AutoLQR::computeGainMatrixASDA_Fixed()
         float pf = q2f(Hk[i], sh) * cum_s;
         Pq[i] = f2q(pf, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t Kq[18];
     {
@@ -2312,21 +2435,22 @@ bool AutoLQR::computeGainMatrixASDA_Fixed()
         matmul_q(BT, Pq, BTP, m, n, n, sh, &st);
         matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
         add_q(Rq, BTPB, Rp, m * m);
-        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        if (!invert_q(Rp, Rp, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
         matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
 
     lastIterations = st.iterations;
+    lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true;
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
@@ -2344,18 +2468,18 @@ bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t BT[18];
     transpose_q(Bq, BT, n, m);
     q_t G0[36];
     {
         q_t Rinv[9], BRi[18];
-        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        if (!invert_q(Rq, Rinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
         matmul_q(BRi, BT, G0, n, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     // D diagonal por normas de linha de A (float — n=6 valores, sqrt barato;
     // mesma heurística do par float computeGainMatrixSDA_Scaled()).
@@ -2379,18 +2503,19 @@ bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
             Hk[i * n + j] = qmul(qmul(Dinvq[i], Qq[i * n + j], sh, &st), Dinvq[j], sh, &st);
         }
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
-    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
-        return false;
-    if (st.overflow) return false;
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, maxIterations, invRelTolerance, nullptr, &st)) {
+        lastOutcome = SolveOutcome::Breakdown; return false;
+    }
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     // P = D · Ĥ · D (recuperação, mesma convenção corrigida do par float)
     q_t Pq[36];
     for (int i = 0; i < n; i++)
         for (int j = 0; j < n; j++)
             Pq[i * n + j] = qmul(qmul(Dq[i], Hk[i * n + j], sh, &st), Dq[j], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t Kq[18];
     {
@@ -2398,21 +2523,22 @@ bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
         matmul_q(BT, Pq, BTP, m, n, n, sh, &st);
         matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
         add_q(Rq, BTPB, Rp, m * m);
-        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        if (!invert_q(Rp, Rp, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
         matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
 
     lastIterations = st.iterations;
+    lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true;
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
@@ -2431,7 +2557,7 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
     using namespace fxq;
     const int n = stateSize, m = controlSize;
     const int sh = Q_SHIFT_DEFAULT;
-    const float gamma = 0.5f;
+    const float gamma = ssGamma; // shift ajustável (setSDASSGamma), default 0.5 — ver Exp. 3
     const int n2 = 2 * n;
 
     if (!A || !B || !Q || !R || !K) return false;
@@ -2443,7 +2569,7 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t BT[18];
     transpose_q(Bq, BT, n, m);
@@ -2451,11 +2577,11 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
     q_t G0[36];
     {
         q_t Rinv[9], BRi[18];
-        if (!invert_q(Rq, Rinv, m, sh, &st)) return false;
+        if (!invert_q(Rq, Rinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(Bq, Rinv, BRi, n, m, m, sh, &st);
         matmul_q(BRi, BT, G0, n, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t gammaQ = f2q(gamma, sh, &st);
     q_t oneQ   = f2q(1.0f, sh, &st);
@@ -2475,10 +2601,10 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
                     N1[(n + i) * n2 + (n + j)] = ((i == j) ? oneQ : 0) - qmul(gammaQ, Aq[j * n + i], sh, &st);
                 }
             }
-            if (st.overflow) return false;
+            if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
-            if (!invert_q(N1, Phi, n2, sh, &st)) return false; // pencil singular/fora de faixa → fallback
-            if (st.overflow) return false;
+            if (!invert_q(N1, Phi, n2, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; } // pencil singular/fora de faixa → fallback
+            if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
             q_t Phi11[36], Phi12[36], Phi21[36], Phi22[36];
             for (int i = 0; i < n; i++) {
@@ -2512,17 +2638,18 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
             matmul_q(Phi22, Qq, T2, n, n, n, sh, &st);
             sub_q(T2, T1, Hk2, n * n);
         }
-        if (st.overflow) return false;
+        if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
         memcpy(Ak, Ak2, sizeof(Ak));
         memcpy(Gk, Gk2, sizeof(Gk));
         memcpy(Hk, Hk2, sizeof(Hk));
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
-    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, 25, 1000, nullptr, &st))
-        return false;
-    if (st.overflow) return false;
+    if (!doubling_loop_q(Ak, Gk, Hk, n, sh, Variant::Standard, maxIterations, invRelTolerance, nullptr, &st)) {
+        lastOutcome = SolveOutcome::Breakdown; return false;
+    }
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     // K = (R+B'PB)^-1 B'PA, com A ORIGINAL (Aq); P=Hk já é o da DARE original
     // (mesma propriedade do par float — ver comentário de computeGainMatrixSDA_SS()).
@@ -2532,21 +2659,22 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
         matmul_q(BT, Hk, BTP, m, n, n, sh, &st);
         matmul_q(BTP, Bq, BTPB, m, n, m, sh, &st);
         add_q(Rq, BTPB, Rp, m * m);
-        if (!invert_q(Rp, Rp, m, sh, &st)) return false;
+        if (!invert_q(Rp, Rp, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(BTP, Aq, BTPA, m, n, n, sh, &st);
         matmul_q(Rp, BTPA, Kq, m, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true;
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 bool AutoLQR::computeGainMatrixIterative_Fixed()
@@ -2560,8 +2688,9 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     const int n = stateSize, m = controlSize;
     const int sh = Q_SHIFT_DEFAULT;
     const int nn = n * n;
-    const int maxIterations = 100; // mesmo orçamento do par float (convergência linear, precisa de mais iterações que o doubling)
-    const int invRelTolerance = 1000;
+    // maxIterations/invRelTolerance agora vêm de setStoppingCriterion() — mesmo
+    // orçamento do par float por padrão (100), configurável para a campanha de
+    // varredura de tolerância (ver docs/auditoria_solvers_riccati.md, Seção 13).
 
     if (!A || !B || !Q || !R || !K || !P_warm) return false;
     if (n != 6 || m != 3) return false;
@@ -2572,7 +2701,7 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     for (int i = 0; i < n * n; i++) { Aq[i] = f2q(A[i], sh, &st); Qq[i] = f2q(Q[i], sh, &st); }
     for (int i = 0; i < n * m; i++)  Bq[i] = f2q(B[i], sh, &st);
     for (int i = 0; i < m * m; i++)  Rq[i] = f2q(R[i], sh, &st);
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t AT[36], BT[18];
     transpose_q(Aq, AT, n, n);
@@ -2592,7 +2721,7 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     } else {
         memcpy(Pk, Qq, sizeof(Pk));
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     int iters = maxIterations;
     for (int it = 0; it < maxIterations; it++) {
@@ -2608,7 +2737,7 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
         for (int i = 0; i < m; i++) S[i * m + i] += eps;
 
         q_t Sinv[9];
-        if (!invert_q(S, Sinv, m, sh, &st)) return false;
+        if (!invert_q(S, Sinv, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
         q_t Ktmp[18], ATPB[18], corr[36];
         matmul_q(Sinv, BTPA, Ktmp, m, m, n, sh, &st);
@@ -2624,17 +2753,24 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
                 Pnext[j * n + i] = avg;
             }
 
-        q_t dmax = 0, hmax = 0;
+        // Critério de parada: norma de Frobenius relativa, calculada em
+        // float a partir dos valores Q13.18 convertidos (q2f) — mesma norma
+        // do caminho float (computeGainMatrixIterative()) e do kernel
+        // compartilhado (FixedPointQ.cpp:doubling_loop_q). Soma de quadrados
+        // de até 36 termos Q13.18 (~2^31 cada) estouraria int64 perto do
+        // teto ±8192; em float o custo é desprezível frente às matmuls.
+        float diffSq = 0.0f, hSq = 0.0f;
         for (int i = 0; i < nn; i++) {
-            q_t d = Pnext[i] - Pk[i]; if (d < 0) d = -d;
-            q_t h = Pk[i];            if (h < 0) h = -h;
-            if (d > dmax) dmax = d;
-            if (h > hmax) hmax = h;
+            float d = q2f(Pnext[i], sh) - q2f(Pk[i], sh);
+            float h = q2f(Pk[i], sh);
+            diffSq += d * d;
+            hSq += h * h;
         }
         memcpy(Pk, Pnext, sizeof(Pk));
-        if ((int64_t)dmax * invRelTolerance < (int64_t)hmax) { iters = it + 1; break; }
+        float relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
+        if (relF < (1.0f / (float)invRelTolerance)) { iters = it + 1; break; }
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     q_t Kq[18];
     {
@@ -2645,21 +2781,26 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
         matmul_q(BT, PA, BTPA, m, n, n, sh, &st);
         add_q(Rq, BTPB, S, m * m);
         for (int i = 0; i < m; i++) S[i * m + i] += eps;
-        if (!invert_q(S, S, m, sh, &st)) return false;
+        if (!invert_q(S, S, m, sh, &st)) { lastOutcome = SolveOutcome::Breakdown; return false; }
         matmul_q(S, BTPA, Kq, m, m, n, sh, &st);
     }
-    if (st.overflow) return false;
+    if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     for (int i = 0; i < m * n; i++) K[i] = q2f(Kq[i], sh);
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pk[i], sh);
     for (int i = 0; i < nn; i++) P_warm[i] = q2f(Pk[i], sh); // atualiza o warm-start p/ a próxima chamada
 
     lastIterations = iters;
+    // breakdown já tratado acima (retorna antes de chegar aqui); o que resta
+    // distinguir é convergência dentro do orçamento (Converged) contra
+    // esgotamento sem breakdown (Budget) — mesma taxonomia dos demais
+    // métodos, ver SolveOutcome e docs/auditoria_solvers_riccati.md Seção 13.
+    lastOutcome = (iters < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
     residualDirty = true;
     lastFixedPointMaxAbsSeen = fxq::q2f(st.max_abs_seen, sh);
-    return true;
+    return lastOutcome == SolveOutcome::Converged;
 }
 
 int AutoLQR::getLastIterations() const {

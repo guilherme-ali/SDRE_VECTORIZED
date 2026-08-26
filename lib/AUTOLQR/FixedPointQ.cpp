@@ -160,18 +160,28 @@ FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Var
             add_q(Hk, T2, Hkn, nn);
         }
 
-        // Convergência: max|ΔHk| * invRelTolerance < max|Hk| (piso ~3.8e-6 em Q13.18)
-        q_t dmax = 0, hmax = 0;
+        // Convergência: norma de Frobenius relativa ‖ΔHk‖_F/‖Hk‖_F < tol —
+        // MESMA norma do caminho float (AutoLQR.cpp), por pedido explícito
+        // do usuário (antes era máx-abs, mais barata em inteiro; ver
+        // docs/auditoria_solvers_riccati.md, Seção 13/14). A soma de
+        // quadrados é feita em float, convertendo cada termo Q13.18 via
+        // q2f() antes de elevar ao quadrado: somar os quadrados em inteiro
+        // (até 36 termos de ~2^31 cada, perto do teto ±8192) estouraria
+        // int64 facilmente; em float o custo de 36 conversões + sqrtf é
+        // desprezível frente às 8 matmuls (1728 multiply-adds) da iteração
+        // — mesma lógica já usada no reescalonamento do ASDA acima.
+        float diffSq = 0.0f, hSq = 0.0f;
         for (int i = 0; i < nn; i++) {
-            q_t d = Hkn[i] - Hk[i]; if (d < 0) d = -d;
-            q_t h = Hk[i];          if (h < 0) h = -h;
-            if (d > dmax) dmax = d;
-            if (h > hmax) hmax = h;
+            float d = q2f(Hkn[i], sh) - q2f(Hk[i], sh);
+            float h = q2f(Hk[i], sh);
+            diffSq += d * d;
+            hSq += h * h;
         }
         memcpy(Ak, Akn, nn * sizeof(q_t));
         memcpy(Gk, Gkn, nn * sizeof(q_t));
         memcpy(Hk, Hkn, nn * sizeof(q_t));
-        if ((int64_t)dmax * invRelTolerance < (int64_t)hmax) { st->iterations = it + 1; break; }
+        float relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
+        if (relF < (1.0f / (float)invRelTolerance)) { st->iterations = it + 1; break; }
     }
 
     if (cum_s_out) *cum_s_out = cum_s;
