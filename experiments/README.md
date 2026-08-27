@@ -11,7 +11,7 @@ pip install -r requirements.txt
 python python/run_experiments.py --all
 ```
 
-Isso roda os 8 experimentos (~9,7 h no total), a análise de host, as 6 figuras do
+Isso roda os 8 experimentos (~9,5 h no total), a análise de host, as 6 figuras do
 artigo e recompila o PDF. É retomável: se parar no meio, rodar de novo pula o que já
 foi capturado.
 
@@ -38,7 +38,7 @@ foi capturado.
 | `tol_qr` | `experiments/tol_qr_sweep.cpp` | τ=1e-3 é robusto em toda a banda segura de pesos? (Exp. A, o carro-chefe) | `serial_tol_qr_sweep_A.txt` | 280 min |
 | `fronteiras` | `experiments/boundary_fine.cpp` | mapa fino das duas transições de falha (Exp. B) | `serial_boundary_fine_B.txt` | 83 min |
 | `repetibilidade` | `experiments/repeatability.cpp` | variância de tempo no mesmo ponto, 20 repetições (Exp. D) | `serial_repeatability_D.txt` | 58 min |
-| `bateria` | `experiments/benchmark_solvers.cpp` | tempo/erro/convergência dos 12 métodos em 69228 pontos, 6 trajetórias (Exp. 1) | `serial_capture_bateria_v5_6traj.txt` | 105 min |
+| `bateria` | `experiments/benchmark_solvers.cpp` | tempo/erro/convergência dos 12 métodos em 60000 pontos, 6 trajetórias (Exp. 1) | `serial_capture_bateria_v5_6traj.txt` | ~90 min |
 | `voo` | `src/main.cpp` (`DEBUG_MODE=true` temporário) | limite prático de frequência do ciclo completo de voo (Exp. E) | `serial_flightloop_E.txt` | 6 min |
 
 Cada linha corresponde a uma seção de resultados do artigo (`docs/auditoria_solvers_riccati.md`
@@ -51,7 +51,7 @@ tem o detalhamento técnico de cada critério).
 python python/run_experiments.py --only gamma --force --no-pdf
 ```
 
-**Campanha completa** (~9,7 h; retomável — pode interromper e continuar depois):
+**Campanha completa** (~9,5 h; retomável — pode interromper e continuar depois):
 ```
 python python/run_experiments.py --all
 ```

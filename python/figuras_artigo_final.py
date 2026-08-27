@@ -2,7 +2,7 @@
 Figuras do artigo DINAME 2027 — geradas a partir dos dados da campanha final.
 
 Fontes de dados (todas medidas no ESP32-S2, exceto onde indicado):
-  outputs/serial_capture_bateria_v5_6traj.txt   bateria principal (69228 pts x 12 metodos)
+  outputs/serial_capture_bateria_v5_6traj.txt   bateria principal (60000 pts x 12 metodos)
   outputs/serial_tol_qr_sweep_A.txt             tau x Q/R (390 combinacoes x 12 metodos)
   outputs/serial_boundary_fine_B.txt            mapa fino das fronteiras (200 x 10)
   outputs/serial_flightloop_E.txt               ciclo de voo completo (360 s)
@@ -59,7 +59,7 @@ DOUBLING = ["SDA", "SDA_SS", "ASDA", "SDA_SCALED", "ADDA"]
 LBL = {"SDA": "SDA", "SDA_SS": "SDA-SS", "ASDA": "ASDA",
        "SDA_SCALED": "SDA-Scaled", "ADDA": "ADDA", "ITERATIVE": "Value iter."}
 
-PERIOD_US = 5200.0
+PERIOD_US = 6000.0
 
 plt.rcParams.update({
     "font.size": 8.5,
@@ -144,6 +144,23 @@ def load_flight():
              (r"C.lc. .ngulos", "Euler"), ("Matriz Sistema", "SDC matrix"),
              (r"LQR .Ganhos.", "DARE solve"), (r"L.gica Controle", "Control law"),
              (r"C.lc. Omega.", "Mixer"), ("Set Motores", "Motor write")]
+    hist_cdf_p = None
+    hist_cdf_y = None
+    
+    # Check for HIST_PROC_50US in the last block
+    if len(blocks) > 1:
+        last_block = blocks[-1]
+        m_hist = re.search(r"HIST_PROC_50US:([0-9,]+)", last_block)
+        if m_hist:
+            counts = [int(x) for x in m_hist.group(1).split(",") if x]
+            tot = sum(counts)
+            if tot > 0:
+                bin_ms = (np.arange(len(counts)) * 50) / 1000.0 # ms
+                cum = np.cumsum(counts)
+                cdf = 100.0 * cum / tot
+                hist_cdf_p = bin_ms
+                hist_cdf_y = cdf
+                
     for b in blocks[1:]:
         m = re.search(r"Tempo_Processamento:\s*(\d+)", b)
         if m:
@@ -152,7 +169,7 @@ def load_flight():
             mm = re.search(pat + r":\s*(\d+)\s*.s", b)
             if mm:
                 stages[lbl].append(int(mm.group(1)))
-    return proc, stages
+    return proc, stages, (hist_cdf_p, hist_cdf_y)
 
 
 def load_coverage():
@@ -203,7 +220,7 @@ def fig1_envelope(outdir, cover):
     ax2.set_ylabel(r"$\mathrm{cond}(\mathbf{I}+\mathbf{G}\mathbf{P})$")
     ax2.set_title("(b) resulting numerical conditioning", fontsize=8.5)
     ax2.set_xlim(0.34, 0.52)
-    ax2.set_ylim(4.4, 5.95)
+    ax2.set_ylim(5.3, 7.3)
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], marker="o", ls="", ms=4, color=PALETTE[i],
                       label=TRAJ_LBL[t]) for i, t in enumerate(TRAJS)]
@@ -304,7 +321,7 @@ def fig3_predictability(outdir, tt, it):
     ax1.legend(handles=[Patch(facecolor=C_FIXED, label="SDA-fx"),
                         Patch(facecolor=C_VI, label="Value iter.-fx"),
                         Line2D([], [], color="0.2", ls="--", lw=1.0,
-                               label="5.2 ms control period")],
+                               label="6.0 ms control period")],
                loc="upper left", frameon=True, framealpha=0.95,
                edgecolor="0.8", fontsize=7.0, handlelength=1.8,
                borderpad=0.35, labelspacing=0.3)
@@ -428,15 +445,15 @@ def fig5_safety(outdir, agg):
         sub = [(r, v) for r, v in zip(rs, y) if 0.06 <= r <= 20]
         ax2.plot([r for r, _ in sub], [v for _, v in sub], marker=mk, color=col,
                  lw=1.2, ms=4.0, alpha=0.9)
-    ax1.axvline(147.6, color="0.2", ls="--", lw=1.1)
+    ax1.axvline(127.9, color="0.2", ls="--", lw=1.1)
     ax1.set_xscale("log")
     ax1.set_xlabel(r"$R_\mathrm{scale}$ (nominal $=1$)")
     ax1.set_ylabel("breakdown rate (%)")
     ax1.set_ylim(-5, 112)
     ax1.set_yticks([0, 25, 50, 75, 100])
     ax1.set_title("(a) full weighting range", fontsize=8.5)
-    ax1.annotate("$\\mathbf{R}_d$ input\noverflow at $147.6$",
-                 xy=(147.6, 50), xytext=(1.5, 60), fontsize=6.8, color="0.15",
+    ax1.annotate("$\\mathbf{R}_d$ input\noverflow at $127.9$",
+                 xy=(127.9, 50), xytext=(1.5, 60), fontsize=6.8, color="0.15",
                  arrowprops=dict(arrowstyle="->", color="0.3", lw=0.7))
     ax1.text(1.1e-3, 68, r"$\mathbf{G}_0$ setup overflow", fontsize=6.8,
              color="0.15", ha="left")
@@ -462,23 +479,24 @@ def fig5_safety(outdir, agg):
 # --------------------------------------------------------------------------
 # Fig. 6 — ciclo de voo completo
 # --------------------------------------------------------------------------
-def fig6_flight(outdir, proc, stages):
+def fig6_flight(outdir, proc, stages, hist_tuple=None):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.0, 2.24),
                                    gridspec_kw=dict(width_ratios=[1.25, 1.0]))
-    p = np.sort(np.array(proc) / 1000.0)
-    cdf = 100.0 * np.arange(1, len(p) + 1) / len(p)
-    ax1.step(p, cdf, where="post", color=C_FLOAT, lw=1.6)
-    ax1.axvline(5.2, color="#D55E00", ls="--", lw=1.2)
+    if hist_tuple and hist_tuple[0] is not None:
+        p_bins, cdf_y = hist_tuple
+        ax1.step(p_bins, cdf_y, where="post", color=C_FLOAT, lw=1.6)
+    else:
+        p = np.sort(np.array(proc) / 1000.0)
+        cdf = 100.0 * np.arange(1, len(p) + 1) / len(p)
+        ax1.step(p, cdf, where="post", color=C_FLOAT, lw=1.6)
     ax1.axvline(6.0, color="0.25", ls=":", lw=1.2)
     ax1.set_xlabel("cycle processing time (ms)")
     ax1.set_ylabel("cycles below abscissa (%)")
     ax1.set_title("(a) complete control cycle", fontsize=8.5)
-    ax1.set_xlim(4.95, 6.30)
+    ax1.set_xlim(4.60, 6.15)
     ax1.set_ylim(0, 119)
     ax1.set_yticks([0, 25, 50, 75, 100])
-    ax1.text(5.15, 45, "5.2 ms\n(200 Hz)", fontsize=7, color="#D55E00",
-             ha="right", va="center")
-    ax1.text(6.05, 45, "6.0 ms\n(167 Hz)", fontsize=7, color="0.25",
+    ax1.text(6.05, 45, "6.0 ms\n(167 Hz)\ncontrol period", fontsize=7, color="0.25",
              ha="left", va="center")
 
     order = ["DARE solve", "IMU read", "WiFi/UDP", "Euler", "Madgwick",
@@ -510,6 +528,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", default=r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS"
                                         r"\DINAME_2027\artigo_diname\Figures")
+    ap.add_argument("--with-fig2", action="store_true",
+                    help="regenera a Fig. 2 (barras de tempo), removida do v5")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -517,15 +537,18 @@ def main():
     tall, tt, it = load_battery()
     tq = load_tolqr()
     agg = load_boundary()
-    proc, stages = load_flight()
+    proc, stages, hist_tuple = load_flight()
     cover = load_coverage()
     print("gerando figuras em", args.outdir)
     fig1_envelope(args.outdir, cover)
-    fig2_timing(args.outdir, tall)
+    # Fig. 2 (barras de tempo) removida no v5: repetia as duas primeiras colunas
+    # da Tabela 1 sem acrescentar informacao, e o artigo esta no teto de paginas.
+    if args.with_fig2:
+        fig2_timing(args.outdir, tall)
     fig3_predictability(args.outdir, tt, it)
     lo, hi = fig4_tolerance(args.outdir, tq, cover)
     fig5_safety(args.outdir, agg)
-    fig6_flight(args.outdir, proc, stages)
+    fig6_flight(args.outdir, proc, stages, hist_tuple)
     print("piso de quantizacao medido: [%.2e, %.2e]" % (lo, hi))
 
 

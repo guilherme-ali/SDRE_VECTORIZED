@@ -47,13 +47,13 @@ const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
 const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.006f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
 // Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
 // fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
-// N=5 -> dt~25ms (fs~40Hz, margem 5x sobre o fc=8Hz usado na identificacao) ->
-// ~25s de voo em vez de ~5s a cada ciclo.
-const int TELEMETRY_DECIMATION_CYCLES = 5;
+// N=4 -> dt=24ms (fs~42Hz, margem 5,2x sobre o fc=8Hz usado na identificacao) ->
+// ~19,2s de voo em vez de ~4,8s a cada ciclo.
+const int TELEMETRY_DECIMATION_CYCLES = 4;
 
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
@@ -758,6 +758,9 @@ void loop(){
     // Estatisticas do trabalho util (nao saturadas pelo padding) — Exp. E.
     static unsigned long maxProcessingTime   = 0;
     static uint64_t      totalProcessingTime = 0;
+    // Histograma de processingTime com bins de 50 us (0..10000 us = 200 bins + 1 overflow)
+    // Cobre todos os ciclos da campanha para construcao de ECDF exata (Exp. E)
+    static uint32_t      proc_hist[201] = {0};
 
     bool skipThisSample = skip_timing_sample;
     if (skipThisSample) skip_timing_sample = false;
@@ -772,6 +775,8 @@ void loop(){
             maxTime = loopTime;
             newMaxTime = true;
         }
+        int h_bin = (processingTime < 10000) ? (int)(processingTime / 50) : 200;
+        proc_hist[h_bin]++;
     }
 
     float avgTime = (loopCount > 0) ? ((float)totalTime / loopCount) : 0.0f;
@@ -829,6 +834,10 @@ void loop(){
             Serial.printf("   Tempo_Loop: %lu μs\n", loopTime);
             Serial.printf("   Tempo_Maximo: %lu μs\n", maxTime);
             Serial.printf("   Tempo_Medio: %.2f μs\n", avgTime);
+            Serial.print("HIST_PROC_50US:");
+            for (int i = 0; i <= 200; i++) {
+                Serial.printf("%lu%c", (unsigned long)proc_hist[i], (i == 200) ? '\n' : ',');
+            }
 
             if (CONTROLLER_TYPE == 0) {
                 Serial.println("\n⚙️  SDRE TASK (fora do loop de 5ms):");

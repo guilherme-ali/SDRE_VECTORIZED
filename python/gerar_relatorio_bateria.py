@@ -45,7 +45,9 @@ def summaries_to_df(summaries):
 
 
 def gains_erro_k(gains, sample_every=1):
-    """Erro RMS de K (device) vs. referencia scipy, por metodo/trajetoria.
+    """Erro relativo de Frobenius de K (device) vs. referencia scipy, por
+    metodo/trajetoria: ||K_dev-K_ref||_F / ||K_ref||_F (a mesma definicao de
+    e_K usada no artigo, Secao "Reference solution and metrics").
     Usa as trajetorias completas pre-computadas (T4 depende de recursao desde
     k=0 — nao dá pra reconstruir um ponto isolado sem rodar a serie inteira,
     mas gerar as 4 series completas custa menos de 1s com numpy)."""
@@ -66,7 +68,8 @@ def gains_erro_k(gains, sample_every=1):
         except Exception:
             continue
         K_ref = k_from_P(Ad, Bd, Qd, Rd, P_ref)
-        e = float(np.sqrt(np.mean((K_dev - K_ref) ** 2)))
+        norm_ref = np.linalg.norm(K_ref)
+        e = float(np.linalg.norm(K_dev - K_ref) / norm_ref) if norm_ref > 0 else float("nan")
         rows.append({"traj": traj, "k": k, "metodo": metodo, "erro_K": e})
     return pd.DataFrame(rows)
 

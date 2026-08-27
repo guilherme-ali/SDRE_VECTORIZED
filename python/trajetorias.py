@@ -16,7 +16,7 @@ que host e alvo produzem a sequência de estados bit-a-bit comparável (dentro
 da tolerância de float32). Isso é o que se verifica em
 outputs/traj_ref.csv vs. a captura serial (ver plano, Verificação, item 1).
 
-T_s = 5,2 ms — o mesmo período do laço de controle do firmware
+T_s = 6,0 ms — o mesmo período do laço de controle do firmware
 (test/verify_gains_onboard.cpp, src/main.cpp), não um valor arbitrário
 (resposta à anotação #24 do Reginaldo pedindo justificativa para T_s).
 """
@@ -26,10 +26,10 @@ import os
 
 import numpy as np
 
-DT = 0.0052  # s — período real do laço de controle (não os 12 ms do artigo do CBA)
+DT = 0.006  # s — período real do laço de controle (não os 12 ms do artigo do CBA)
 G = 9.81  # m/s^2
 DURATION_S = 60.0
-N_POINTS = int(round(DURATION_S / DT))  # 11538
+N_POINTS = int(round(DURATION_S / DT))  # 10000
 
 # Saturação de atitude: evita a singularidade de sec(theta) na cinemática de
 # Euler e mantém o ponto de operação fisicamente plausível para um

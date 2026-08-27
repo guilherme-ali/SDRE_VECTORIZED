@@ -2,15 +2,17 @@
  * MAPA FINO DAS DUAS FRONTEIRAS DE FALHA (Exp. B da campanha estendida) —
  * o Exp. A (test/tol_qr_sweep.cpp) mapeou as duas fronteiras em grade
  * grossa (13 décadas de R_scale, 1e-6 a 1e6) e confirmou o limiar analítico
- * da fronteira superior em 144,5 com precisão de uma década (0% em 1e2,
- * 100% em 1e3). Este experimento refina a grade perto das duas transições:
+ * da fronteira superior (dt-dependente — ver abaixo) com precisão de uma
+ * década. Este experimento refina a grade perto das duas transições:
  * 25 pontos log-espaçados em [1e-3, 1e1] (fronteira inferior, gradual —
- * overflow de G0=B*R^-1*B^T no setup, Seção 16.2 da auditoria) e 15 pontos
- * em [50, 500] (fronteira superior, nítida — overflow de entrada de Rd,
- * limiar teórico 144,5). Objetivo: dar uma regra de projeto a priori mais
- * precisa que "década tal ou qual", e verificar se a fronteira superior é
- * de fato uma função degrau (0%→100% num intervalo estreito em torno de
- * 144,5) como o modelo analítico prevê, ou se há uma zona de transição.
+ * overflow de G0=B*R^-1*B^T no setup, Seção 16.2 da auditoria, mecanismo
+ * independente de dt) e 15 pontos em [43,3, 433,3] (fronteira superior,
+ * nítida — overflow de entrada de Rd, limiar teórico 8192/64,033≈127,9 a
+ * dt=6,0ms — era [50,500]/144,5 a dt=5,2ms, recentrado proporcionalmente).
+ * Objetivo: dar uma regra de projeto a priori mais precisa que "década tal
+ * ou qual", e verificar se a fronteira superior é de fato uma função degrau
+ * (0%→100% num intervalo estreito em torno do limiar) como o modelo
+ * analítico prevê, ou se há uma zona de transição.
  *
  * Estrutura idêntica a test/sweep_qr.cpp (mesmos 10 métodos — 5 doubling
  * float + 5 fixed; ITERATIVE/ITERATIVE_FIXED fora, não são o alvo desta
@@ -157,14 +159,19 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
     Rd[2 * M + 2] = R_33 * dt + (Q_66 * inv_Izz * inv_Izz) * dt3_over_3;
 }
 
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
-static const int STRIDE = 231; // ~50 pontos/traj * 6 = ~300 pontos totais
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
+static const int STRIDE = 200; // 10000/200 = 50 pontos/traj * 6 = 300 pontos totais
 static const int N_PER_TRAJ = (N_POINTS_FULL + STRIDE - 1) / STRIDE;
 static const int N_TRAJ = Trajectories::N_TRAJ; // 6
 
 // Grade fina: 25 pontos log-espacados em [1e-3,1e1] (fronteira inferior,
-// gradual) + 15 pontos em [50,500] (fronteira superior, nitida perto de
-// 144.5) -- ver docs/auditoria_solvers_riccati.md, Secoes 16.1/16.2/16.4.
+// gradual, mecanismo independente de dt -- overflow interno de G0=B*R^-1*B^T,
+// nao remapeado) + 15 pontos em [43,3;433,3] (fronteira superior, nitida).
+// A dt=6,0ms, Rd[0][0] = 64,033*r_scale + O(q_rate_scale) (era 55,495*r_scale
+// a 5,2ms) -- limiar 8192/64,033 ~= 127,9 (era 147,6). Grade recentrada por
+// escala uniforme (razao 127,9/147,6) preservando os mesmos 15 pontos
+// log-espacados relativos ao limiar -- ver docs/auditoria_solvers_riccati.md,
+// Secoes 16.1/16.2/16.4.
 static const int N_R = 40;
 static const float R_SCALES[N_R] = {
     1.000000e-03f, 1.467799e-03f, 2.154435e-03f, 3.162278e-03f, 4.641589e-03f,
@@ -172,9 +179,9 @@ static const float R_SCALES[N_R] = {
     4.641589e-02f, 6.812921e-02f, 1.000000e-01f, 1.467799e-01f, 2.154435e-01f,
     3.162278e-01f, 4.641589e-01f, 6.812921e-01f, 1.000000e+00f, 1.467799e+00f,
     2.154435e+00f, 3.162278e+00f, 4.641589e+00f, 6.812921e+00f, 1.000000e+01f,
-    5.000000e+01f, 5.893843e+01f, 6.947477e+01f, 8.189469e+01f, 9.653489e+01f,
-    1.137923e+02f, 1.341348e+02f, 1.581139e+02f, 1.863797e+02f, 2.196985e+02f,
-    2.589737e+02f, 3.052701e+02f, 3.598428e+02f, 4.241714e+02f, 5.000000e+02f
+    4.333333e+01f, 5.107997e+01f, 6.021147e+01f, 7.097539e+01f, 8.366356e+01f,
+    9.861998e+01f, 1.162501e+02f, 1.370320e+02f, 1.615290e+02f, 1.904054e+02f,
+    2.244439e+02f, 2.645674e+02f, 3.118638e+02f, 3.676152e+02f, 4.333333e+02f
 };
 static const int N_QR = 5;
 static const float QRATE_SCALES[N_QR] = {0.01f, 0.1f, 1.0f, 10.0f, 100.0f};

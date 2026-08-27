@@ -34,7 +34,7 @@ PYTHON_DIR = REPO / "python"
 ARTIGO_DIR = Path(
     r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname"
 )
-ARTIGO_TEX = "diname2027_v3.tex"
+ARTIGO_TEX = "diname2027_v4.tex"
 
 sys.path.insert(0, str(PYTHON_DIR))
 
@@ -141,8 +141,8 @@ EXPERIMENTS: List[Experiment] = [
         outfile="serial_capture_bateria_v5_6traj.txt",
         markers=["FIM DO BENCHMARK"],
         baud=921600,
-        est_minutes=105,
-        description="Exp. 1 - bateria principal (69228 pontos, 6 trajetorias x 12 metodos)",
+        est_minutes=91,
+        description="Exp. 1 - bateria principal (60000 pontos, 6 trajetorias x 12 metodos)",
         analysis=_run_bateria,
     ),
     Experiment(

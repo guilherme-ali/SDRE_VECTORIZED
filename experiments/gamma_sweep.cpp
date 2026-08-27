@@ -162,7 +162,7 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 // esperado e correto (ver o cabeçalho de lib/Trajectories/Trajectories.h e o
 // plano da campanha estendida, item 0.2).
 // ---------------------------------------------------------------------------
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
 static const int N_TRAJ = Trajectories::N_TRAJ;               // 6
 
 // ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ static const int N_METHODS = 2;
 static const char* METHODS[N_METHODS] = {"SDA_SS", "SDA_SS_FIXED"};
 AutoLQR lqr[N_METHODS] = {AutoLQR(N, M), AutoLQR(N, M)};
 
-static const int STRIDE = 38; // 11538/38 ~= 300 pontos por trajetoria
+static const int STRIDE = 33; // 10000/33 ~= 303 pontos por trajetoria
 static const int N_PER_TRAJ = (N_POINTS_FULL + STRIDE - 1) / STRIDE;
 
 struct GammaStats {

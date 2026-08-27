@@ -4,7 +4,7 @@
  * consecutivas. Até esta sessão, cada ponto da bateria principal e dos
  * sweeps foi medido exatamente 1 vez — a margem de tempo real alegada no
  * artigo (SDA-fx: 3,92+0,9=4,82ms médio, 4,05+0,9=4,95ms pior caso, contra
- * 5,2ms de período) assume implicitamente que o tempo de execução é
+ * 6,0ms de período) assume implicitamente que o tempo de execução é
  * determinístico ponto a ponto. Este experimento testa essa suposição.
  *
  * Metodologia: ~2000 pontos de operação amostrados das 6 trajetórias de
@@ -159,9 +159,9 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
     Rd[2 * M + 2] = R_33 * dt + (Q_66 * inv_Izz * inv_Izz) * dt3_over_3;
 }
 
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
 static const int N_TRAJ = Trajectories::N_TRAJ;                // 6
-static const int STRIDE = 35; // 11538/35 ~= 330 pontos/traj * 6 = ~1980 pontos totais
+static const int STRIDE = 30; // 10000/30 ~= 333 pontos/traj * 6 = ~1998 pontos totais
 static const int N_PER_TRAJ = (N_POINTS_FULL + STRIDE - 1) / STRIDE;
 
 static const int N_REPS = 20;

@@ -167,7 +167,7 @@ static Case discretizeAndPack(const std::string& name, const ContinuousModel& md
 }
 
 // ============================================================================
-// C1 — hover nominal (src/main.cpp: Ixx/Iyy/Izz/Ir reais, dt=5.2ms, Bryson Q/R)
+// C1 — hover nominal (src/main.cpp: Ixx/Iyy/Izz/Ir reais, dt=6.0ms, Bryson Q/R)
 // ============================================================================
 static Case buildC1Hover() {
     const float Ixx=42.95e-6f, Iyy=37.77e-6f, Izz=76.15e-6f, Ir=1.02e-7f;
@@ -175,7 +175,7 @@ static Case buildC1Hover() {
     const float MOTOR_B=2.98e-8f, MOTOR_D=0.05f*MOTOR_B;
     const float MAX_RPM=26423.0f;
     const float MAX_OMEGA=(MAX_RPM*2.0f*(float)M_PI)/60.0f;
-    const float dt = 0.0052f;
+    const float dt = 0.006f;
 
     ContinuousModel mdl = buildQuadrotorModel("C1_hover", Ixx,Iyy,Izz,Ir, 0,0,0,0,0,0,0);
     applyBrysonCost(mdl, MOTOR_B, MOTOR_D, L_ARM, MAX_OMEGA);
@@ -229,7 +229,7 @@ static std::vector<Case> buildC3AttitudeSweep(int count, unsigned seed) {
     const float MOTOR_B=2.98e-8f, MOTOR_D=0.05f*MOTOR_B;
     const float MAX_RPM=26423.0f;
     const float MAX_OMEGA=(MAX_RPM*2.0f*(float)M_PI)/60.0f;
-    const float dt = 0.0052f;
+    const float dt = 0.006f;
 
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> step(-0.05f, 0.05f);
@@ -275,14 +275,14 @@ static std::vector<Case> buildC4IllConditioned() {
         ContinuousModel mdl = buildQuadrotorModel("C4b_R_small", Ixx,Iyy,Izz,Ir, 0,0,0,0,0,0,0);
         applyBrysonCost(mdl, MOTOR_B, MOTOR_D, L_ARM, MAX_OMEGA);
         mdl.Rc *= 1e-4f;
-        cases.push_back(discretizeAndPack("C4b_R_small", mdl, 0.0052f, true));
+        cases.push_back(discretizeAndPack("C4b_R_small", mdl, 0.006f, true));
     }
     // C4c: Q quase nulo (sistema quase sem custo de estado)
     {
         ContinuousModel mdl = buildQuadrotorModel("C4c_Q_small", Ixx,Iyy,Izz,Ir, 0,0,0,0,0,0,0);
         applyBrysonCost(mdl, MOTOR_B, MOTOR_D, L_ARM, MAX_OMEGA);
         mdl.Qc *= 1e-4f;
-        cases.push_back(discretizeAndPack("C4c_Q_small", mdl, 0.0052f, true));
+        cases.push_back(discretizeAndPack("C4c_Q_small", mdl, 0.006f, true));
     }
     return cases;
 }
@@ -312,7 +312,7 @@ static Case buildC5UnequalScale() {
     mdl.B = D * mdl.B;
     mdl.Qc = Dinv.transpose() * mdl.Qc * Dinv;
 
-    return discretizeAndPack("C5_unequal_scale", mdl, 0.0052f, true);
+    return discretizeAndPack("C5_unequal_scale", mdl, 0.006f, true);
 }
 
 // ============================================================================

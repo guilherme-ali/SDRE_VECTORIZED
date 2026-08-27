@@ -154,10 +154,11 @@ def print_report(df):
         print(g_hi.to_string())
         print("-> 100%% BREAKDOWN, uniforme nos cinco metodos (era so no SDA_FIXED que a telemetria")
         print("   escondia isso). Mecanismo identificado ANALITICAMENTE (nao e so 'overflow/pivo")
-        print("   singular' generico): Rd[0][0] = 55,5 x r_scale estoura o teto +-8192 do Q13.18")
-        print("   JA na conversao de ENTRADA (f2q), antes de qualquer laco de duplicacao rodar --")
-        print("   limiar r_scale = 8192/55,5 ~= 147,6, coerente com a falha aparecer exatamente")
-        print("   no salto da grade de 1e2 (0%% falha) para 1e3 (100%% falha).")
+        print("   singular' generico): Rd[0][0] = 64,033 x r_scale estoura o teto +-8192 do Q13.18")
+        print("   (coeficiente a dt=6,0ms; era 55,495 a dt=5,2ms) JA na conversao de ENTRADA (f2q),")
+        print("   antes de qualquer laco de duplicacao rodar -- limiar r_scale = 8192/64,033 ~= 127,9")
+        print("   (era ~147,6), coerente com a falha aparecer exatamente no salto da grade de 1e2")
+        print("   (0%% falha) para 1e3 (100%% falha).")
 
     print("\n--- nota sobre max_abs_seen em r_scale>=1000 ---")
     sub_hi = df[(df["r_scale"] >= 1000) & (df["metodo"] == "ASDA_FIXED")]

@@ -180,7 +180,7 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 // ---------------------------------------------------------------------------
 // Trajetórias — vindas de lib/Trajectories/Trajectories.h (fonte única, seis
 // trajetórias, espelhada em python/trajetorias.py), amostradas por stride
-// (Exp. 0 não precisa dos 11538 pontos, só de uma amostra representativa).
+// (Exp. 0 não precisa dos 10000 pontos, só de uma amostra representativa).
 //
 // MUDANÇA DE DADOS: a cópia local de T4 deste arquivo usava uma APROXIMAÇÃO
 // de regime permanente (envelope exponencial fechado, sinal da derivada de
@@ -189,9 +189,9 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 // esperado e correto (ver o cabeçalho de lib/Trajectories/Trajectories.h e o
 // plano da campanha estendida, item 0.2). O catch-up da recursão é feito
 // dentro de Trajectories::pointT4(), então a amostragem por stride continua
-// valendo sem percorrer os 11538 pontos no laço daqui.
+// valendo sem percorrer os 10000 pontos no laço daqui.
 // ---------------------------------------------------------------------------
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
 static const int N_TRAJ = Trajectories::N_TRAJ;               // 6
 
 // ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ AutoLQR lqr0a[N_METHODS_0A] = {
     AutoLQR(N, M), AutoLQR(N, M), AutoLQR(N, M), AutoLQR(N, M), AutoLQR(N, M),
 };
 
-static const int STRIDE_0A = 38; // 11538/38 ~= 300 pontos por trajetoria
+static const int STRIDE_0A = 33; // 10000/33 ~= 303 pontos por trajetoria
 static const int N_PER_TRAJ_0A = (N_POINTS_FULL + STRIDE_0A - 1) / STRIDE_0A;
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ static const int N_METHODS_0B = 2;
 static const char* METHODS_0B[N_METHODS_0B] = {"ITERATIVE", "ITERATIVE_FIXED"};
 AutoLQR lqr0b[N_METHODS_0B] = {AutoLQR(N, M), AutoLQR(N, M)};
 
-static const int STRIDE_0B = 116; // 11538/116 ~= 100 pontos por trajetoria
+static const int STRIDE_0B = 100; // 10000/100 = 100 pontos por trajetoria
 static const int N_PER_TRAJ_0B = (N_POINTS_FULL + STRIDE_0B - 1) / STRIDE_0B;
 
 struct TolStats {

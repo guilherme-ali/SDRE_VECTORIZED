@@ -47,8 +47,8 @@ public:
     // (1000 x 68 B = 68.000 B) cabia com apenas 144 B de sobra — nao havia
     // espaco para os 6 B/amostra de custo de ciclo sem reduzir a capacidade.
     // 800 x 76 B = 60.800 B: cabe com ~7,3 KB a mais de DRAM livre que o
-    // firmware anterior, ao custo de 800*5*5,2ms = 20,8 s de janela de voo
-    // gravada (era 26 s) — ver TELEMETRY_DECIMATION_CYCLES em src/main.cpp.
+    // firmware anterior, ao custo de 800*4*6,0ms = 19,2 s de janela de voo
+    // gravada — ver TELEMETRY_DECIMATION_CYCLES em src/main.cpp.
     static constexpr size_t CAPACITY = 800;
 
     Telemetry() : head(0), count(0) {}

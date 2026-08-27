@@ -45,7 +45,7 @@ L_ARM = 0.060 * 0.70710678
 MOTOR_B, MOTOR_D = 2.98e-8, 0.05 * 2.98e-8
 MAX_RPM = 26423.0
 MAX_OMEGA = (MAX_RPM * 2.0 * math.pi) / 60.0
-DT = trj.DT  # 0.0052 s — mesmo período do firmware
+DT = trj.DT  # 0.006 s — mesmo período do firmware
 
 ROLL_MAX, PITCH_MAX, YAW_MAX = math.radians(45), math.radians(45), math.radians(90)
 P_MAX, Q_MAX, R_MAX = math.radians(300), math.radians(300), math.radians(200)
@@ -450,7 +450,7 @@ def run_compare(device_csv):
     # e _derivar_central() (trajetorias.py) faz x[1] em d[0]=(x[1]-x[0])/dt,
     # que sempre daria IndexError num array de tamanho 1 se a trajetoria caisse
     # no ramo de diferenca central (nao regressiva). gerar_todas() ja calcula o
-    # array completo (11538 pontos) uma vez por trajetoria; indexar por k evita
+    # array completo (10000 pontos) uma vez por trajetoria; indexar por k evita
     # o caso de borda da diferenca central E generaliza para as 6 trajetorias
     # sem precisar listar cada uma a mao.
     dados_todas = trj.gerar_todas()

@@ -1,0 +1,131 @@
+"""Verificacao final: cada numero afirmado no diname2027_v5.tex contra os dados brutos.
+
+Uso: python verifica_numeros_artigo.py
+"""
+import os
+import re
+import statistics as st
+from collections import defaultdict
+
+import numpy as np
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(REPO, "outputs")
+TEX = r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname\diname2027_v5.tex"
+
+ok = []
+bad = []
+
+
+def check(label, claimed, measured, tol=0.02):
+    """tol relativa; measured==None => nao verificavel automaticamente."""
+    if measured is None:
+        return
+    rel = abs(claimed - measured) / abs(measured) if measured else abs(claimed - measured)
+    (ok if rel <= tol else bad).append(
+        "%-52s artigo=%-12s dados=%-12s (dif %.1f%%)" % (label, claimed, round(measured, 6), 100 * rel)
+    )
+
+
+def load_runs(path):
+    t, it, res = defaultdict(list), defaultdict(list), defaultdict(list)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.startswith("RUN,"):
+                continue
+            p = line.rstrip().split(",")
+            if len(p) < 8:
+                continue
+            t[p[3]].append(int(p[4]))
+            it[p[3]].append(int(p[5]))
+            res[p[3]].append(float(p[6]))
+    return t, it, res
+
+
+t2, i2, r2 = load_runs(os.path.join(OUT, "serial_capture_bateria_v5_6traj.txt"))
+t3, i3, _ = load_runs(os.path.join(OUT, "s3", "serial_capture_bateria_s3.txt"))
+
+# ---- Tabela 1 (S2) ----
+TAB1 = {  # metodo: (t50, t999, iters)
+    "SDA": (8.87, 8.92, 9.00), "SDA_SS": (9.37, 9.43, 7.00), "ADDA": (9.58, 9.64, 9.00),
+    "SDA_SCALED": (9.71, 9.77, 9.00), "ASDA": (10.19, 10.25, 9.00), "ITERATIVE": (1.03, 19.28, 8.60),
+    "SDA_FIXED": (3.67, 3.69, 9.00), "SDA_SCALED_FIXED": (3.80, 3.83, 9.00),
+    "SDA_SS_FIXED": (3.91, 3.95, 7.00), "ASDA_FIXED": (4.20, 4.23, 9.00),
+    "ADDA_FIXED": (4.99, 5.03, 9.00), "ITERATIVE_FIXED": (0.95, 14.66, 8.62),
+}
+for m, (a, b, c) in TAB1.items():
+    check("Tab1 %s t50" % m, a, st.median(t2[m]) / 1e3)
+    check("Tab1 %s t99.9" % m, b, np.percentile(t2[m], 99.9) / 1e3)
+    check("Tab1 %s iters" % m, c, st.mean(i2[m]))
+
+# ---- Tabela 2 (S3) ----
+TAB2 = {"SDA": (1.06, 2.76), "SDA_SS": (1.18, 3.06), "ADDA": (1.04, 3.96),
+        "SDA_SCALED": (1.08, 2.82), "ASDA": (1.10, 3.13)}
+for m, (fl, fx) in TAB2.items():
+    check("Tab2 %s S3-float" % m, fl, st.median(t3[m]) / 1e3)
+    check("Tab2 %s S3-fx" % m, fx, st.median(t3[m + "_FIXED"]) / 1e3)
+
+# ---- razoes ----
+DBL = ["SDA", "SDA_SS", "ADDA", "SDA_SCALED", "ASDA"]
+sp = [st.median(t2[m]) / st.median(t2[m + "_FIXED"]) for m in DBL]
+check("speedup S2 minimo (1.92)", 1.92, min(sp))
+check("speedup S2 maximo (2.55)", 2.55, max(sp))
+s3r = [st.median(t3[m + "_FIXED"]) / st.median(t3[m]) for m in DBL]
+check("S3 float mais rapido, min (2.6)", 2.6, min(s3r))
+check("S3 float mais rapido, max (3.8)", 3.8, max(s3r))
+plat = [st.median(t2[m + "_FIXED"]) / st.median(t3[m + "_FIXED"]) for m in DBL]
+check("S2-fx/S3-fx min (1.26)", 1.26, min(plat))
+check("S2-fx/S3-fx max (1.35)", 1.35, max(plat))
+fl = [st.median(t2[m]) / st.median(t3[m]) for m in DBL]
+check("S3-float/S2-float min (7.9)", 7.9, min(fl))
+check("S3-float/S2-float max (9.3)", 9.3, max(fl))
+check("VI ganho fx (1.09)", 1.09, st.median(t2["ITERATIVE"]) / st.median(t2["ITERATIVE_FIXED"]))
+check("VI vs SDA-fx mediana (3.9)", 3.9, st.median(t2["SDA_FIXED"]) / st.median(t2["ITERATIVE_FIXED"]))
+
+# ---- condicionamento ----
+import csv
+cond, normP = [], []
+with open(os.path.join(OUT, "cobertura_full_v5_6traj.csv"), encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        cond.append(float(row["cond_IGP"]))
+        normP.append(float(row["normP_F"]))
+check("cond(I+GP) min (5.54)", 5.54, min(cond))
+check("cond(I+GP) max (7.07)", 7.07, max(cond))
+check("||P||_F min (0.375)", 0.375, min(normP))
+check("||P||_F max (0.487)", 0.487, max(normP))
+check("piso min 4.7e-5", 4.7e-5, 6 * 2 ** -18 / max(normP))
+check("piso max 6.1e-5", 6.1e-5, 6 * 2 ** -18 / min(normP))
+check("n de pontos (60000)", 60000, len(cond))
+
+# ---- voo ----
+txt = open(os.path.join(OUT, "serial_flightloop_E.txt"), encoding="utf-8", errors="replace").read()
+blocks = txt.split("STATUS DO SISTEMA")
+last = blocks[-1]
+hist = [int(x) for x in re.search(r"HIST_PROC_50US:([0-9,]+)", last).group(1).split(",") if x]
+tot = sum(hist)
+cum = np.cumsum(hist)
+cdf = 100.0 * cum / tot
+q = lambda p: (np.searchsorted(cdf, p) * 50) / 1000.0
+check("voo: n de ciclos (47802)", 47802, tot)
+check("voo: mediana 4.70 ms", 4.70, q(50))
+check("voo: p99 5.15 ms", 5.15, q(99))
+check("voo: p99.9 5.70 ms", 5.70, q(99.9))
+check("voo: estouros 0.063%", 0.063, 100.0 * sum(hist[120:]) / tot)
+check("voo: maximo 6.99 ms", 6.99, int(re.search(r"Processamento_Maximo:\s*(\d+)", last).group(1)) / 1e3)
+mean_loop = float(re.search(r"Tempo_Medio:\s*([\d.]+)", last).group(1))
+check("voo: periodo medio 6.0029 ms", 6.0029, mean_loop / 1e3)
+prints = [int(m) for m in re.findall(r"Tempo dos Prints:\s*(\d+)", txt)]
+check("voo: n de blocos de print (290)", 290, len(prints))
+check("voo: tempo de prints 65.76 s", 65.76, sum(prints) / 1e6)
+check("voo: tempo de laco 286.95 s", 286.95, tot * mean_loop / 1e6)
+check("voo: init 8.29 s", 8.29, 361 - tot * mean_loop / 1e6 - sum(prints) / 1e6, tol=0.05)
+
+print("=" * 96)
+print("CONFEREM (%d):" % len(ok))
+for s in ok:
+    print("  OK  " + s)
+print()
+print("DIVERGEM (%d):" % len(bad))
+for s in bad:
+    print("  XX  " + s)
+print("=" * 96)

@@ -167,7 +167,7 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 }
 
 // ---------------------------------------------------------------------------
-// Pontos de operação — 75 por trajetória (1:154 das 11538), reaproveitando as
+// Pontos de operação — 75 por trajetória (1:133 das 10000), reaproveitando as
 // formas fechadas de lib/Trajectories/Trajectories.h (fonte única, seis
 // trajetórias, espelhada em python/trajetorias.py).
 //
@@ -178,11 +178,11 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 // anteriores, o que é esperado e correto (ver o cabeçalho de
 // lib/Trajectories/Trajectories.h e o plano da campanha estendida, item 0.2).
 // O catch-up da recursão é feito dentro de Trajectories::pointT4(), então a
-// amostragem por STRIDE continua funcionando sem percorrer os 11538 pontos no
+// amostragem por STRIDE continua funcionando sem percorrer os 10000 pontos no
 // laço daqui.
 // ---------------------------------------------------------------------------
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
-static const int STRIDE = 154; // 11538/154 ~= 75 pontos por trajetoria
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
+static const int STRIDE = 133; // 10000/133 ~= 75 pontos por trajetoria
 static const int N_PER_TRAJ = (N_POINTS_FULL + STRIDE - 1) / STRIDE;
 static const int N_TRAJ = Trajectories::N_TRAJ; // 6
 

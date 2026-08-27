@@ -29,7 +29,7 @@
  * campanha nova supersede aqueles dados (ver o plano da campanha estendida,
  * Fase 0, item 0.2, e docs/auditoria_solvers_riccati.md, Seção 15).
  *
- * A recursão é streamada (O(1) de memória, sem armazenar os 11538 pontos).
+ * A recursão é streamada (O(1) de memória, sem armazenar os 10000 pontos).
  * Para os consumidores que amostram por STRIDE, pointT4() faz o "catch-up"
  * automático: se o k pedido está à frente do estado interno, os passos
  * intermediários são avançados silenciosamente (aritmética idêntica, logo o
@@ -65,9 +65,9 @@ namespace Trajectories {
 // ===========================================================================
 // Constantes físicas / de amostragem
 // ===========================================================================
-static const float DT = 0.0052f;          // s — período real do laço de controle
+static const float DT = 0.006f;           // s — período real do laço de controle
 static const float DURATION_S = 60.0f;    // s — duração de cada trajetória
-static const int   N_POINTS_FULL = (int)(DURATION_S / DT); // 11538
+static const int   N_POINTS_FULL = (int)(DURATION_S / DT); // 10000
 static const float G_ACCEL = 9.81f;       // m/s^2
 
 // ===========================================================================
@@ -177,9 +177,9 @@ inline void attitudeT5(float t, float& phi, float& theta, float& psi) {
  *  dos 60° padrão: aqui se isola o efeito da TAXA, não do ângulo (esse é T5).
  *  psi acompanha em 2 Hz para que r também suba (r = -sin(phi)*theta_dot +
  *  cos(phi)*cos(theta)*psi_dot).
- *  Nota de amostragem: 10 Hz a DT = 5,2 ms dá ~19 amostras/ciclo; o
+ *  Nota de amostragem: 10 Hz a DT = 6,0 ms dá ~17 amostras/ciclo; o
  *  diferenciador central de 3 pontos atenua a amplitude da derivada em
- *  sin(w*DT)/(w*DT) = 0,982 (1,8%), o que é o mesmo viés que T3 já tem no
+ *  sin(w*DT)/(w*DT) = 0,976 (2,4%), o que é o mesmo viés que T3 já tem no
  *  fim do chirp — não um artefato novo. */
 inline void attitudeT6(float t, float& phi, float& theta, float& psi) {
     const float A = 45.0f * DEG_TO_RAD;

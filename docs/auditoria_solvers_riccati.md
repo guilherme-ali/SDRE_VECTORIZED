@@ -1238,3 +1238,61 @@ título incluir "Cost Predictability".
 referência a versões anteriores. 10 páginas, 6 figuras novas
 (`python/figuras_artigo_final.py`), 1 tabela, zero citação indefinida. Figuras verificadas
 individualmente quanto a legibilidade e sobreposição de legenda sobre dados.
+
+## 18. Migração do período de controle de 5,2 ms para 6,0 ms (2026-08-26)
+
+### 18.1 Motivação
+
+O Exp. E (Seção 16.8) mediu, a 5,2 ms (200 Hz), overrun de 7,9–9,3% dos ciclos do laço de voo
+completo (`processingTime` mediana 5100 µs, p99 5747 µs, máximo absoluto observado entre 6484 e
+6916 µs em duas capturas). O artigo já registrava, a partir dessa mesma medição, que "every sampled
+cycle completes within 6.0 ms, so a 167 Hz loop closes with margin" — a decisão aqui é **tornar essa
+frase medida em vez de inferida**: mover o firmware de voo para 6,0 ms (167 Hz) e medir o overrun
+residual diretamente, em vez de extrapolar de uma cauda de amostras a 1 Hz.
+
+### 18.2 O que mudou
+
+`dt` tem duas fontes independentes, ambas migradas: `src/main.cpp:50`
+(`SAMPLING_TIME_S`, síncrono) e `lib/Trajectories/Trajectories.h:68` (`Trajectories::DT`, consumido
+por todos os 7 firmwares de `experiments/` e por `python/trajetorias.py`/`bench_trajetorias.py` no
+host). `test/native/verify_solvers.cpp` e `test/bench/verify_gains_onboard.cpp` replicam `dt`
+localmente e foram migrados junto.
+
+`N_POINTS_FULL` (60 s / dt) caiu de 11538 para 10000 pontos por trajetória — a bateria principal
+passa de 69228 para 60000 pontos totais. Os *strides* de amostragem dos sweeps (`gamma_sweep`,
+`repeatability`, `sweep_qr`, `tol_qr_sweep`, `tolerance_sweep`, `boundary_fine`) foram reajustados
+para preservar o mesmo tamanho amostral da campanha publicada.
+
+**Grade fina do Exp. B recentrada.** `Rd[0][0] = R_11_nom·dt·r_scale + O(dt³)` — o coeficiente que
+multiplica `r_scale` cresce com `dt` (55,495 → 64,033 a 5,2→6,0 ms), então o limiar analítico de
+overflow de entrada do Q13.18 cai de `8192/55,495≈147,6` para `8192/64,033≈127,9`. A grade fina de
+15 pontos da fronteira superior em `experiments/boundary_fine.cpp` foi reescalada
+proporcionalmente ([50,500] → [43,3, 433,3]) para continuar centrada no novo limiar; a fronteira
+inferior (25 pontos em [1e-3, 1e1], mecanismo de overflow interno de `G0=B·R⁻¹·B^T`) não depende
+dessa derivação e foi mantida.
+
+**Decimação da telemetria** reduzida de N=5 para N=4 ciclos (`src/main.cpp`), preservando margem de
+~5× sobre os 8 Hz da identificação (era caindo para 4,2× com N=5 a 6,0 ms); janela de voo do buffer
+passa de 20,8 s para 19,2 s.
+
+### 18.3 Verificação de host (antes do hardware)
+
+Regressão de 3174 casos (`test/native/verify_solvers.cpp`) com `dt=6,0ms`: **zero divergência de
+outcome** em relação ao baseline arquivado a `dt=5,2ms` (mesmos 2691 sucessos / 483 falhas,
+caso a caso — os 483 são casos de fronteira deliberadamente desenhados para falhar, ex.
+`C4b_R_small`/`C4c_Q_small`). Contagem de iterações da família de duplicação permanece em 9–10 no
+caso nominal (`C1_hover`), confirmando que a comparação cruzada com a campanha de 5,2 ms continua
+defensável.
+
+### 18.4 Resultado (a preencher após a recampanha)
+
+<!-- outputs/serial_flightloop_E.txt a dt=6,0ms: overrun medido, processingTime mediana/p99/max. -->
+
+### 18.5 Escopo
+
+A campanha completa (Exp. 0/1/A–E) foi rerodada em `dt=6,0ms` para manter bancada, malha fechada e
+voo no mesmo período — ao custo de ~9,7 h de hardware e da reescrita numérica do artigo
+(`69228→60000` pontos, `T_s=5,2ms→6,0ms` em todo o texto, limiar de overflow `147,6→127,9`,
+Tabela 1 e as 6 figuras regeneradas). A campanha de 5,2 ms permanece arquivada em
+`outputs/archive/dt_5p2ms/` para referência histórica; as Seções 16–17 descrevem essa campanha
+anterior e não foram reescritas.

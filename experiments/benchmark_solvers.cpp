@@ -13,7 +13,7 @@
  * objeção de reprodutibilidade do revisor 3), definidas de uma vez só em
  * lib/Trajectories/Trajectories.h (fonte única, espelhada em
  * python/trajetorias.py) e avaliadas ponto a ponto, O(1) de memória (nada de
- * armazenar os 11538 pontos por trajetória — cada ponto é calculado por
+ * armazenar os 10000 pontos por trajetória — cada ponto é calculado por
  * avaliação direta de t-DT/t/t+DT, exceto T4, cuja conformação de 1a ordem é
  * uma recursão streamada):
  *
@@ -48,10 +48,10 @@
  * docs/auditoria_solvers_riccati.md, Seção 13): o Exp. 0b
  * (test/tolerance_sweep.cpp) os avalia em pontos DECIMADOS (stride ~0,6s
  * entre amostras consecutivas), o que destrói justamente a premissa do
- * warm-start — em voo real o ciclo anterior está a 5,2 ms de distância, não
+ * warm-start — em voo real o ciclo anterior está a 6,0 ms de distância, não
  * a 600 ms, e é essa proximidade que dá ao warm-start um ponto de partida
  * útil. Esta bateria já reaproveita a MESMA instância AutoLQR ao longo dos
- * 11538 pontos consecutivos de cada trajetória (laço abaixo), então
+ * 10000 pontos consecutivos de cada trajetória (laço abaixo), então
  * ITERATIVE/ITERATIVE_FIXED recebem warm-start genuíno de fábrica, sem
  * nenhuma configuração extra — o Exp. 0b mede o pior caso (sem vizinhança
  * temporal), esta bateria mede o caso real de voo.
@@ -250,7 +250,7 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 // header. Seis trajetórias: T1-T4 (inalteradas) + T5_tilt_alto e
 // T6_taxa_alta.
 // ---------------------------------------------------------------------------
-static const int N_POINTS = Trajectories::N_POINTS_FULL; // 11538
+static const int N_POINTS = Trajectories::N_POINTS_FULL; // 10000
 static const int N_TRAJ = Trajectories::N_TRAJ;          // 6
 
 // ITERATIVE/ITERATIVE_FIXED de volta (ver comentário no cabeçalho do

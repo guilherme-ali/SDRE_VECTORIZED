@@ -163,14 +163,14 @@ static void updateSystemMatrix(float roll, float pitch, float p, float q, float 
 }
 
 // ---------------------------------------------------------------------------
-// Pontos de operação — ~50 por trajetória (1:231 das 11538), das 6
+// Pontos de operação — ~50 por trajetória (1:200 das 10000), das 6
 // trajetórias de lib/Trajectories/Trajectories.h. ~300 pontos totais por
 // combinação de (tau, r_scale, q_rate_scale) — mais esparso que sweep_qr.cpp
 // (75/traj) porque aqui o eixo de tau multiplica o número de combinações
 // por 6.
 // ---------------------------------------------------------------------------
-static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 11538
-static const int STRIDE = 231; // 11538/231 ~= 50 pontos por trajetoria
+static const int N_POINTS_FULL = Trajectories::N_POINTS_FULL; // 10000
+static const int STRIDE = 200; // 10000/200 = 50 pontos por trajetoria
 static const int N_PER_TRAJ = (N_POINTS_FULL + STRIDE - 1) / STRIDE;
 static const int N_TRAJ = Trajectories::N_TRAJ; // 6
 
