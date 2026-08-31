@@ -245,13 +245,37 @@ inline int   t4_k_next = 0;
 
 inline void resetT4() { t4_phi_prev = 0.0f; t4_theta_prev = 0.0f; t4_k_next = 0; }
 
-/** Um passo da recursão: leva (phi_prev, theta_prev) do índice j-1 para j. */
+/** Um passo da recursão: leva (phi_prev, theta_prev) do índice j-1 para j.
+ *
+ *  O alvo é uma onda quadrada derivada da FASE, não do sinal de um seno.
+ *  A versão anterior usava `sinf(2*pi*t/T) >= 0`, e o período de 2 s com
+ *  DT = 6 ms faz a grade cair EXATAMENTE sobre os zeros dessas funções
+ *  (t = 3,0 s para o seno em k = 500; t = 1,5 s para o cosseno em k = 250).
+ *  No zero o sinal depende da precisão: sinf(3*pi) em float32 dá -8,7e-8 e
+ *  sin(3*pi) em float64 dá +3,7e-16 — alvos opostos, ±40°. Com alpha = 0,0385
+ *  sobre 80° de diferença, um passo separava firmware e espelho de host em
+ *  3,08°, e o descasamento reaparecia a cada cruzamento: 1734 dos 10000 pontos.
+ *  Isso entrava no e_K como se fosse erro de solver (4,18e-4 em T4 contra
+ *  1,5e-6 no ponto real), inflando a coluna float da Tabela 1 do artigo.
+ *
+ *  A forma abaixo decide pelo intervalo de fase, com aritmética exata em
+ *  qualquer precisão: fase < 0,5 -> +1, senão -1 (o cosseno é a mesma onda
+ *  adiantada de um quarto de período). Nenhum transcendental, nenhum zero
+ *  ambíguo, e o espelho em python/trajetorias.py reproduz bit-a-bit.
+ */
 inline void t4RawStep(int j, float& phi_prev, float& theta_prev) {
     if (j == 0) { phi_prev = 0.0f; theta_prev = 0.0f; return; }
     const float tau = 0.15f, periodo = 2.0f;
-    float t = j * DT;
-    float alvo_phi   = 40.0f * DEG_TO_RAD * (sinf(2.0f * (float)M_PI * t / periodo) >= 0.0f ? 1.0f : -1.0f);
-    float alvo_theta = 40.0f * DEG_TO_RAD * (cosf(2.0f * (float)M_PI * t / periodo) >= 0.0f ? 1.0f : -1.0f);
+    const float amp = 40.0f * DEG_TO_RAD;
+
+    // Fase em [0,1) sem transcendental: j*DT/periodo com a parte inteira fora.
+    float ciclos = (j * DT) / periodo;
+    float fase = ciclos - floorf(ciclos);
+    // sin >= 0  <=>  fase em [0, 0.5)
+    float alvo_phi = (fase < 0.5f) ? amp : -amp;
+    // cos >= 0  <=>  fase em [0, 0.25) ou [0.75, 1)
+    float alvo_theta = (fase < 0.25f || fase >= 0.75f) ? amp : -amp;
+
     float alpha = DT / (tau + DT);
     phi_prev   = phi_prev   + alpha * (alvo_phi   - phi_prev);
     theta_prev = theta_prev + alpha * (alvo_theta - theta_prev);

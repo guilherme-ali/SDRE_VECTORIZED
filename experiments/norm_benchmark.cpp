@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include "AutoLQR.h"
 #include "FixedPointQ.h"
 #include <math.h>
@@ -27,6 +28,8 @@ static inline float q2f_mul(q_t x, float inv_scale) {
 void setup() {
     Serial.begin(115200);
     delay(2000);
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     Serial.println("=================================================");
     Serial.println("MICROBENCHMARK: NORMA DE FROBENIUS & KERNEL Q13.18");
     Serial.println("=================================================");

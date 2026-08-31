@@ -65,9 +65,23 @@ def main():
     ap.add_argument("--saida", default="outputs/cobertura_full_v5_6traj.csv")
     ap.add_argument("--stride", type=int, default=1,
                      help="1 = todos os 46152 pontos (default); >1 para amostragem mais rapida")
+    ap.add_argument("--fonte", choices=["dispositivo", "espelho"], default="dispositivo",
+                     help="'dispositivo' (default) usa as linhas PT da captura da bateria — o "
+                          "estado que o firmware de fato usou; 'espelho' regenera em Python.")
     args = ap.parse_args()
 
-    dados = trj.gerar_todas()
+    # A referencia de dupla precisao so' e' comparavel ao dispositivo se for
+    # avaliada NO MESMO ponto de operacao. Regenerar a trajetoria em Python
+    # introduz descasamento de modelo — em T4 o alvo do degrau vem do sinal de
+    # um seno e a grade de 6 ms cai sobre os zeros, onde float32 e float64
+    # escolhem alvos opostos. Ver python/pontos_dispositivo.py.
+    if args.fonte == "dispositivo":
+        import pontos_dispositivo as pd_
+        dados = pd_.carregar()
+        print("# fonte dos pontos: linhas PT da captura da bateria (estado medido)")
+    else:
+        dados = trj.gerar_todas()
+        print("# fonte dos pontos: espelho de host (python/trajetorias.py)")
     os.makedirs(os.path.dirname(args.saida), exist_ok=True)
 
     resumo = {}

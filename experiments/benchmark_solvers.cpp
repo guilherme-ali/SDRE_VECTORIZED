@@ -87,7 +87,7 @@
  * Saída em CSV pelo serial (921600 baud — 800.000+ linhas no total; a
  * 115200 baud a transmissão dominaria o tempo total do benchmark):
  *   PT,<traj>,<k>,<t>,<phi>,<theta>,<psi>,<p>,<q>,<r>            — 1/ponto
- *   RUN,<traj>,<k>,<metodo>,<time_us>,<iters>,<residuo_dare>,<ok> — decimado 1:5
+ *   RUN,<traj>,<k>,<metodo>,<time_us>,<iters>,<residuo_dare>,<ok>,<rel_step>,<bit_exact> — decimado 1:5
  *   GAIN,<traj>,<k>,<metodo>,K00..K25                             — decimado 1:50
  *   SUMMARY,<traj|ALL>,<metodo>,mean_us,std_us,max_us,mean_iters,max_iters,
  *           mean_res,max_res,failures,count                       — 1/método/trajetória + geral
@@ -104,6 +104,7 @@
  */
 
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include <math.h>
 #include <esp_timer.h>
@@ -354,6 +355,8 @@ void run() {
     while (!Serial && millis() - t_serial < 3000) {}
     delay(1500);
 
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     for (int m = 0; m < N_METHODS; m++) {
         lqr[m].setStoppingCriterion(BATTERY_REL_TOL, BATTERY_MAX_ITERS);
     }
@@ -394,14 +397,18 @@ void run() {
                 int iters = lqr[m].getLastIterations();
                 float resid = lqr[m].getLastResidual();
                 AutoLQR::SolveOutcome outcome = lqr[m].getLastOutcome();
+                float step = lqr[m].getLastStepDelta();
+                bool bitExact = lqr[m].getLastStepIsBitExactZero();
 
                 statsTraj[traj][m].add((double)dt_us, (double)iters, (double)resid, outcome);
                 statsAll[m].add((double)dt_us, (double)iters, (double)resid, outcome);
 
                 if (logRun) {
-                    Serial.printf("RUN,%s,%d,%s,%lld,%d,%.6e,%d\n",
+                    // rel_step/bit_exact acrescentados ao final — SUMMARY não muda, para não
+                    // quebrar python/figuras_artigo_final.py::load_battery() nem verifica_numeros_artigo.py.
+                    Serial.printf("RUN,%s,%d,%s,%lld,%d,%.6e,%d,%.6e,%d\n",
                                   Trajectories::TRAJ_NAMES[traj], k, METHODS[m], (long long)dt_us, iters, resid,
-                                  (int)outcome);
+                                  (int)outcome, step, bitExact ? 1 : 0);
                 }
                 if (logGain) {
                     float K[M * N];

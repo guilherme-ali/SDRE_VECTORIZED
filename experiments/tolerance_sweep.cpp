@@ -39,14 +39,18 @@
  *
  * Saída CSV pelo serial (921600 baud):
  *   EXP,0a|0b
- *   RUN,<sub>,<tol>,<traj>,<k>,<metodo>,<time_us>,<iters>,<residuo_dare>,<outcome>
- *   SUMMARY,<sub>,<tol>,<metodo>,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total
+ *   RUN,<sub>,<tol>,<traj>,<k>,<metodo>,<time_us>,<iters>,<residuo_dare>,<outcome>,<rel_step>,<bit_exact>
+ *   SUMMARY,<sub>,<tol>,<metodo>,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total,mean_step,n_bit_exact
  *   outcome: 0=converged 1=budget(censurado, NAO falha numerica) 2=breakdown
+ *   rel_step: ‖ΔH‖_F/‖H_k‖_F na última iteração executada (ver AutoLQR::getLastStepDelta()).
+ *   bit_exact: 1 se ΔH==0 bit-a-bit em Q13.18 na última iteração (0 sempre p/ os métodos
+ *              float — não instrumentado; ver AutoLQR::getLastStepIsBitExactZero()).
  *
  * Consumidor: python/analisa_tolerancia.py.
  */
 
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include <math.h>
 #include <esp_timer.h>
@@ -199,7 +203,13 @@ static const int N_TRAJ = Trajectories::N_TRAJ;               // 6
 // ---------------------------------------------------------------------------
 static const int N_TOL = 5;
 static const float TOLERANCES[N_TOL] = {1e-2f, 1e-3f, 1e-4f, 1e-5f, 1e-6f};
-static const int MAXITER_0A = 200;
+// Orçamento da família de duplicação — generoso (converge em ~7-11 em regime),
+// existe para não confundir "budget-exhausted" com o piso de quantização.
+// Sobrescrevível em tempo de compilação (-DSWEEP_MAX_ITERS_DOUBLING=<n>).
+#ifndef SWEEP_MAX_ITERS_DOUBLING
+#define SWEEP_MAX_ITERS_DOUBLING 200
+#endif
+static const int MAXITER_0A = SWEEP_MAX_ITERS_DOUBLING;
 
 static const int N_METHODS_0A = 10;
 static const char* METHODS_0A[N_METHODS_0A] = {
@@ -217,7 +227,15 @@ static const int N_PER_TRAJ_0A = (N_POINTS_FULL + STRIDE_0A - 1) / STRIDE_0A;
 // ---------------------------------------------------------------------------
 // Exp. 0b — iteração de valor, mesmas 5 tolerâncias, orçamento 2000.
 // ---------------------------------------------------------------------------
-static const int MAXITER_0B = 2000;
+// 2000 (não 200): a iteração de valor converge linearmente (ρ de malha
+// fechada com mediana ~0,99), e o objetivo do sweep de tau é medir o piso de
+// quantização, não o corte por orçamento — 2000 dá margem para a parada
+// ocorrer pelo piso mesmo em tau=1e-6. Sobrescrevível
+// (-DSWEEP_MAX_ITERS_VALUE_ITERATION=<n>).
+#ifndef SWEEP_MAX_ITERS_VALUE_ITERATION
+#define SWEEP_MAX_ITERS_VALUE_ITERATION 2000
+#endif
+static const int MAXITER_0B = SWEEP_MAX_ITERS_VALUE_ITERATION;
 static const int N_METHODS_0B = 2;
 static const char* METHODS_0B[N_METHODS_0B] = {"ITERATIVE", "ITERATIVE_FIXED"};
 AutoLQR lqr0b[N_METHODS_0B] = {AutoLQR(N, M), AutoLQR(N, M)};
@@ -227,10 +245,13 @@ static const int N_PER_TRAJ_0B = (N_POINTS_FULL + STRIDE_0B - 1) / STRIDE_0B;
 
 struct TolStats {
     int n_total = 0, n_converged = 0, n_budget = 0, n_breakdown = 0;
+    int n_bit_exact = 0; // quantas chamadas pararam com ΔH==0 bit-exato (ver getLastStepIsBitExactZero())
     double mean_time = 0, M2_time = 0;
     double mean_iters = 0, M2_iters = 0;
-    void add(double time_us, double iters, AutoLQR::SolveOutcome outcome) {
+    double mean_step = 0, M2_step = 0; // ‖ΔH‖_F/‖H_k‖_F no instante da parada (ver getLastStepDelta())
+    void add(double time_us, double iters, double step, bool bit_exact, AutoLQR::SolveOutcome outcome) {
         n_total++;
+        if (bit_exact) n_bit_exact++;
         if (outcome == AutoLQR::SolveOutcome::Budget) { n_budget++; return; }
         if (outcome == AutoLQR::SolveOutcome::Breakdown) { n_breakdown++; return; }
         n_converged++;
@@ -240,6 +261,7 @@ struct TolStats {
         };
         upd(time_us, mean_time, M2_time);
         upd(iters, mean_iters, M2_iters);
+        upd(step, mean_step, M2_step);
     }
     double std_time() const { return n_converged > 0 ? sqrt(M2_time / n_converged) : 0.0; }
 };
@@ -250,8 +272,8 @@ TolStats stats0b[N_TOL][N_METHODS_0B];
 void runExp0a() {
     Serial.println("EXP,0a");
     Serial.println("# familia de duplicacao, 5 tolerancias, orcamento 200 iteracoes, 300 pts/traj");
-    Serial.println("# RUN,0a,tol,traj,k,metodo,time_us,iters,residuo_dare,outcome");
-    Serial.println("# SUMMARY,0a,tol,metodo,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total");
+    Serial.println("# RUN,0a,tol,traj,k,metodo,time_us,iters,residuo_dare,outcome,rel_step,bit_exact");
+    Serial.println("# SUMMARY,0a,tol,metodo,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total,mean_step,n_bit_exact");
 
     for (int m = 0; m < N_METHODS_0A; m++) lqr0a[m].setStoppingCriterion(1e-3f, MAXITER_0A);
 
@@ -280,11 +302,13 @@ void runExp0a() {
                     int iters = lqr0a[m].getLastIterations();
                     float resid = lqr0a[m].getLastResidual();
                     AutoLQR::SolveOutcome outcome = lqr0a[m].getLastOutcome();
+                    float step = lqr0a[m].getLastStepDelta();
+                    bool bitExact = lqr0a[m].getLastStepIsBitExactZero();
 
-                    stats0a[it][m].add((double)dt_us, (double)iters, outcome);
-                    Serial.printf("RUN,0a,%.0e,%s,%d,%s,%lld,%d,%.6e,%d\n",
+                    stats0a[it][m].add((double)dt_us, (double)iters, (double)step, bitExact, outcome);
+                    Serial.printf("RUN,0a,%.0e,%s,%d,%s,%lld,%d,%.6e,%d,%.6e,%d\n",
                                   tol, Trajectories::TRAJ_NAMES[traj], k, METHODS_0A[m],
-                                  (long long)dt_us, iters, resid, (int)outcome);
+                                  (long long)dt_us, iters, resid, (int)outcome, step, bitExact ? 1 : 0);
                 }
                 yield();
             }
@@ -292,9 +316,10 @@ void runExp0a() {
 
         for (int m = 0; m < N_METHODS_0A; m++) {
             TolStats& s = stats0a[it][m];
-            Serial.printf("SUMMARY,0a,%.0e,%s,%.2f,%.2f,%.3f,%d,%d,%d,%d\n",
+            Serial.printf("SUMMARY,0a,%.0e,%s,%.2f,%.2f,%.3f,%d,%d,%d,%d,%.6e,%d\n",
                           tol, METHODS_0A[m], s.mean_time, s.std_time(), s.mean_iters,
-                          s.n_converged, s.n_budget, s.n_breakdown, s.n_total);
+                          s.n_converged, s.n_budget, s.n_breakdown, s.n_total,
+                          s.mean_step, s.n_bit_exact);
         }
         unsigned long elapsed_s = (millis() - t0) / 1000;
         Serial.printf("# progresso 0a: tol=%.0e (%d/%d) elapsed=%lus\n", tol, it + 1, N_TOL, elapsed_s);
@@ -305,8 +330,8 @@ void runExp0a() {
 void runExp0b() {
     Serial.println("EXP,0b");
     Serial.println("# iteracao de valor, 5 tolerancias, orcamento 2000 iteracoes, 100 pts/traj (subamostrado)");
-    Serial.println("# RUN,0b,tol,traj,k,metodo,time_us,iters,residuo_dare,outcome");
-    Serial.println("# SUMMARY,0b,tol,metodo,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total");
+    Serial.println("# RUN,0b,tol,traj,k,metodo,time_us,iters,residuo_dare,outcome,rel_step,bit_exact");
+    Serial.println("# SUMMARY,0b,tol,metodo,mean_us,std_us,mean_iters,n_converged,n_budget,n_breakdown,n_total,mean_step,n_bit_exact");
 
     unsigned long t0 = millis();
     for (int it = 0; it < N_TOL; it++) {
@@ -333,11 +358,13 @@ void runExp0b() {
                     int iters = lqr0b[m].getLastIterations();
                     float resid = lqr0b[m].getLastResidual();
                     AutoLQR::SolveOutcome outcome = lqr0b[m].getLastOutcome();
+                    float step = lqr0b[m].getLastStepDelta();
+                    bool bitExact = lqr0b[m].getLastStepIsBitExactZero();
 
-                    stats0b[it][m].add((double)dt_us, (double)iters, outcome);
-                    Serial.printf("RUN,0b,%.0e,%s,%d,%s,%lld,%d,%.6e,%d\n",
+                    stats0b[it][m].add((double)dt_us, (double)iters, (double)step, bitExact, outcome);
+                    Serial.printf("RUN,0b,%.0e,%s,%d,%s,%lld,%d,%.6e,%d,%.6e,%d\n",
                                   tol, Trajectories::TRAJ_NAMES[traj], k, METHODS_0B[m],
-                                  (long long)dt_us, iters, resid, (int)outcome);
+                                  (long long)dt_us, iters, resid, (int)outcome, step, bitExact ? 1 : 0);
                     yield(); // dentro do laço de metodos aqui: cada chamada pode levar ate ~2s
                 }
             }
@@ -345,9 +372,10 @@ void runExp0b() {
 
         for (int m = 0; m < N_METHODS_0B; m++) {
             TolStats& s = stats0b[it][m];
-            Serial.printf("SUMMARY,0b,%.0e,%s,%.2f,%.2f,%.3f,%d,%d,%d,%d\n",
+            Serial.printf("SUMMARY,0b,%.0e,%s,%.2f,%.2f,%.3f,%d,%d,%d,%d,%.6e,%d\n",
                           tol, METHODS_0B[m], s.mean_time, s.std_time(), s.mean_iters,
-                          s.n_converged, s.n_budget, s.n_breakdown, s.n_total);
+                          s.n_converged, s.n_budget, s.n_breakdown, s.n_total,
+                          s.mean_step, s.n_bit_exact);
         }
         unsigned long elapsed_s = (millis() - t0) / 1000;
         Serial.printf("# progresso 0b: tol=%.0e (%d/%d) elapsed=%lus\n", tol, it + 1, N_TOL, elapsed_s);
@@ -361,6 +389,8 @@ void run() {
     while (!Serial && millis() - t_serial < 3000) {}
     delay(1500);
 
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     Serial.println("# VARREDURA DE TOLERANCIA (Exp. 0) -- ver cabecalho do arquivo");
     unsigned long global_t0 = millis();
 

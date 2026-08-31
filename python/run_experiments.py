@@ -31,12 +31,49 @@ from typing import Callable, List, Optional
 REPO = Path(__file__).resolve().parent.parent
 OUTPUTS = REPO / "outputs"
 PYTHON_DIR = REPO / "python"
-ARTIGO_DIR = Path(
-    r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname"
-)
-ARTIGO_TEX = "diname2027_v4.tex"
-
 sys.path.insert(0, str(PYTHON_DIR))
+
+
+def _carrega_config():
+    """Le campanha.json (opcional) e variaveis de ambiente.
+
+    O repositorio guarda firmware, dados e analise; nao deveria saber em qual
+    versao do artigo eles estao sendo usados. Manter o nome do .tex embutido no
+    fonte fez o runner apontar para uma versao antiga por varias rodadas sem que
+    ninguem notasse, porque o passo de PDF quase sempre roda com --no-pdf.
+    """
+    import json
+    cfg = {"artigo_dir": None, "artigo_tex": "auto"}
+    f = REPO / "campanha.json"
+    if f.exists():
+        try:
+            lido = json.loads(f.read_text(encoding="utf-8"))
+            cfg.update({k: v for k, v in lido.items() if not k.startswith("_")})
+        except Exception as e:
+            print(f"AVISO: campanha.json ilegivel ({e}); passo de PDF desligado.")
+    cfg["artigo_dir"] = os.environ.get("SDRE_ARTIGO_DIR", cfg.get("artigo_dir"))
+    cfg["artigo_tex"] = os.environ.get("SDRE_ARTIGO_TEX", cfg.get("artigo_tex", "auto"))
+    return cfg
+
+
+_CFG = _carrega_config()
+ARTIGO_DIR = Path(_CFG["artigo_dir"]) if _CFG.get("artigo_dir") else None
+
+
+def artigo_tex_atual():
+    """Nome do .tex a recompilar, ou None se o passo deve ser pulado.
+    'auto' escolhe o de maior versao vN, o que sobrevive a criacao de um v9."""
+    if ARTIGO_DIR is None or not ARTIGO_DIR.exists():
+        return None
+    alvo = _CFG.get("artigo_tex") or "auto"
+    if alvo != "auto":
+        return alvo if (ARTIGO_DIR / alvo).exists() else None
+    cands = []
+    for f in ARTIGO_DIR.glob("*_v*.tex"):
+        m = re.search(r"_v(\d+)\.tex$", f.name)
+        if m:
+            cands.append((int(m.group(1)), f.name))
+    return max(cands)[1] if cands else None
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +181,24 @@ EXPERIMENTS: List[Experiment] = [
         est_minutes=91,
         description="Exp. 1 - bateria principal (60000 pontos, 6 trajetorias x 12 metodos)",
         analysis=_run_bateria,
+    ),
+    Experiment(
+        key="norma",
+        env="norm_benchmark",
+        outfile="serial_norm_benchmark.txt",
+        markers=["FIM DO MICROBENCHMARK"],
+        baud=115200,
+        est_minutes=2,
+        description="Custo isolado do teste de Frobenius e da aritmetica pura por iteracao",
+    ),
+    Experiment(
+        key="benchmark_s3",
+        env="benchmark_s3",
+        outfile="s3/serial_capture_bateria_s3.txt",
+        markers=["FIM DO BENCHMARK"],
+        baud=921600,
+        est_minutes=25,
+        description="Tabela 2 - mesma bateria no ESP32-S3 (com FPU), p/ comparar S2 vs S3",
     ),
     Experiment(
         key="voo",
@@ -304,6 +359,8 @@ def run_board_experiment(ctx: RunContext, exp: Experiment, port: str) -> None:
         ctx.status[exp.key] = "dry-run"
         return
 
+    outfile.parent.mkdir(parents=True, exist_ok=True)  # ex.: outfile "s3/serial_....txt"
+
     t0 = time.time()
     timeout_s = max(exp.est_minutes * 60 * 3, 300)  # teto generoso: 3x a estimativa
     result = capture(
@@ -437,8 +494,8 @@ def run_flight_experiment(ctx: RunContext, exp: Experiment, port: str) -> None:
 
 def run_host_phases(ctx: RunContext) -> None:
     if ctx.args.dry_run:
-        ctx.log("(--dry-run) fases de host: malha fechada, cobertura, relatorio da bateria.")
-        for k in ("malha_fechada", "cobertura", "relatorio_bateria"):
+        ctx.log("(--dry-run) fases de host: malha fechada, cobertura, relatorio da bateria, memoria.")
+        for k in ("malha_fechada", "cobertura", "relatorio_bateria", "memoria"):
             ctx.status[k] = "dry-run"
         return
 
@@ -472,6 +529,26 @@ def run_host_phases(ctx: RunContext) -> None:
         ctx.status["relatorio_bateria"] = f"FALHOU: {e}"
         ctx.log(f"relatorio da bateria falhou: {e}")
 
+    ctx.log("Fase de host: metricas de memoria (linker map do firmware de voo)...")
+    try:
+        ctx.run_python(["python/parse_memory_map.py"])
+        ctx.status["memoria"] = "OK"
+    except Exception as e:
+        ctx.status["memoria"] = f"FALHOU: {e}"
+        ctx.log(f"metricas de memoria falharam: {e}")
+
+    # Ultima fase de propósito: reprova a campanha se as capturas nao vierem
+    # todas do mesmo build, do chip certo e a 240 MHz. Sem isto uma captura
+    # velha sobrevive em silencio — foi o que aconteceu com a bateria anterior
+    # a otimizacao push-through do ADDA.
+    ctx.log("Fase de host: procedencia das capturas (commit, chip, clock)...")
+    try:
+        ctx.run_python(["python/verifica_procedencia.py"])
+        ctx.status["procedencia"] = "OK"
+    except Exception as e:
+        ctx.status["procedencia"] = f"REPROVADO: {e}"
+        ctx.log(f"ATENCAO: verificacao de procedencia reprovou -- {e}")
+
 
 def run_figures(ctx: RunContext) -> None:
     if ctx.args.dry_run:
@@ -494,9 +571,15 @@ def run_article_pdf(ctx: RunContext) -> None:
         ctx.status["pdf"] = "dry-run"
         return
 
-    if not ARTIGO_DIR.exists():
-        ctx.log(f"AVISO: diretorio do artigo nao encontrado ({ARTIGO_DIR}); pulando compilacao do PDF.")
-        ctx.status["pdf"] = "pulado (diretorio nao encontrado)"
+    if ARTIGO_DIR is None or not ARTIGO_DIR.exists():
+        ctx.log("Passo de PDF desligado (sem artigo_dir valido em campanha.json / SDRE_ARTIGO_DIR).")
+        ctx.status["pdf"] = "pulado (nao configurado)"
+        return
+
+    artigo_tex = artigo_tex_atual()
+    if artigo_tex is None:
+        ctx.log(f"AVISO: nenhum .tex correspondente em {ARTIGO_DIR}; pulando compilacao do PDF.")
+        ctx.status["pdf"] = "pulado (.tex nao encontrado)"
         return
 
     pdflatex = shutil.which("pdflatex")
@@ -506,13 +589,13 @@ def run_article_pdf(ctx: RunContext) -> None:
         ctx.status["pdf"] = "pulado (MiKTeX ausente)"
         return
 
-    stem = ARTIGO_TEX[:-4]
-    ctx.log(f"Recompilando o artigo ({ARTIGO_TEX})...")
+    stem = artigo_tex[:-4]
+    ctx.log(f"Recompilando o artigo ({artigo_tex})...")
     try:
-        ctx.run(["pdflatex", "-interaction=nonstopmode", ARTIGO_TEX], cwd=ARTIGO_DIR, check=False)
+        ctx.run(["pdflatex", "-interaction=nonstopmode", artigo_tex], cwd=ARTIGO_DIR, check=False)
         ctx.run(["bibtex", stem], cwd=ARTIGO_DIR, check=False)
-        ctx.run(["pdflatex", "-interaction=nonstopmode", ARTIGO_TEX], cwd=ARTIGO_DIR, check=False)
-        ctx.run(["pdflatex", "-interaction=nonstopmode", ARTIGO_TEX], cwd=ARTIGO_DIR, check=False)
+        ctx.run(["pdflatex", "-interaction=nonstopmode", artigo_tex], cwd=ARTIGO_DIR, check=False)
+        ctx.run(["pdflatex", "-interaction=nonstopmode", artigo_tex], cwd=ARTIGO_DIR, check=False)
         pdf_path = ARTIGO_DIR / f"{stem}.pdf"
         if pdf_path.exists():
             ctx.status["pdf"] = f"OK ({pdf_path})"

@@ -24,6 +24,7 @@
  */
 
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include <math.h>
 #include <esp_timer.h>
@@ -265,6 +266,8 @@ void run() {
     while (!Serial && millis() - t_serial < 3000) {}
     delay(1500);
 
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     Serial.println("# VARREDURA DE GAMMA (Exp. 3) -- ver cabecalho do arquivo");
     unsigned long global_t0 = millis();
 

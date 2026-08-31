@@ -28,6 +28,7 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
     , lastResidual(-1.0f)
     , residualDirty(false)
     , lastStepDelta(-1.0f)
+    , lastStepIsBitExactZero(false)
     , lastFixedPointMaxAbsSeen(0.0f)
     , residualHistoryCount(0)
 {
@@ -303,6 +304,8 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    lastStepDelta = st.rel_step;
+    lastStepIsBitExactZero = st.bit_exact_zero;
     // doubling_loop_q não retorna false por esgotar o orçamento (só por
     // singularidade — ver FixedPointQ.cpp), então st.iterations==maxIterations
     // sem overflow é censura por orçamento (Budget), não convergência. Antes
@@ -448,6 +451,7 @@ bool AutoLQR::computeGainMatrixSDA()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
+    bool bit_exact = false;
 
     // Inicializar histórico de resíduos
     residualHistoryCount = 0;
@@ -491,8 +495,10 @@ bool AutoLQR::computeGainMatrixSDA()
         // docs/auditoria_solvers_riccati.md, Seção 13).
         float diff = 0.0f;
         float norm_Hk = 0.0f;
+        bit_exact = true;
         for (int i = 0; i < stateSize * stateSize; i++) {
             float d = Hk_next[i] - Hk[i];
+            if (Hk_next[i] != Hk[i]) bit_exact = false;
             diff += d * d;
             norm_Hk += Hk[i] * Hk[i];
         }
@@ -516,6 +522,7 @@ bool AutoLQR::computeGainMatrixSDA()
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = SolveOutcome::Converged;
             break;
         }
@@ -524,6 +531,7 @@ bool AutoLQR::computeGainMatrixSDA()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff; // último valor calculado dentro do loop (Hk já foi sobrescrito)
+        lastStepIsBitExactZero = bit_exact;
         lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
@@ -1260,6 +1268,7 @@ bool AutoLQR::computeGainMatrixIterative()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
+    bool bit_exact = false;
 
     // Inicializar histórico de resíduos
     residualHistoryCount = 0;
@@ -1298,10 +1307,12 @@ bool AutoLQR::computeGainMatrixIterative()
         // equivalente em computeGainMatrixSDA().
         float diff = 0.0f;
         float P_norm = 0.0f;
+        bit_exact = true;
 
         for (int i = 0; i < nn; i++) {
             P_new[i] = Q[i] + ATPA[i] - correction[i];
             float d = P_new[i] - Pw[i];
+            if (P_new[i] != Pw[i]) bit_exact = false;
             diff += d * d;
             P_norm += Pw[i] * Pw[i];
         }
@@ -1331,6 +1342,7 @@ bool AutoLQR::computeGainMatrixIterative()
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = SolveOutcome::Converged;
             break;
         }
@@ -1339,6 +1351,7 @@ bool AutoLQR::computeGainMatrixIterative()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff; // último valor calculado dentro do loop
+        lastStepIsBitExactZero = bit_exact;
         lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
@@ -1459,6 +1472,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f;
+    bool bit_exact = false;
 
     float* R_inv = new float[mm]();
     float* BT = new float[m * n]();
@@ -1586,8 +1600,10 @@ bool AutoLQR::computeGainMatrixSDA_SS()
         // Critério de parada: norma de Frobenius relativa — ver
         // comentário equivalente em computeGainMatrixSDA().
         float diff = 0.0f, norm_Hk = 0.0f;
+        bit_exact = true;
         for (int i = 0; i < nn; i++) {
             float d = Hk_next[i] - Hk[i];
+            if (Hk_next[i] != Hk[i]) bit_exact = false;
             diff += d * d;
             norm_Hk += Hk[i] * Hk[i];
         }
@@ -1608,6 +1624,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = SolveOutcome::Converged;
             break;
         }
@@ -1616,6 +1633,7 @@ bool AutoLQR::computeGainMatrixSDA_SS()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff;
+        lastStepIsBitExactZero = bit_exact;
         lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
@@ -1692,6 +1710,7 @@ bool AutoLQR::computeGainMatrixASDA()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f;
+    bool bit_exact = false;
     float cum_s = 1.0f; // produto acumulado dos fatores de escala (para desfazer em P)
 
     // Alocação de memória
@@ -1806,8 +1825,10 @@ bool AutoLQR::computeGainMatrixASDA()
             // com norm_Gk/norm_Hk do reescalonamento adaptativo (ASDA),
             // mesmo escopo do laço.
             float diff_conv = 0.0f, norm_Hk_conv = 0.0f;
+            bit_exact = true;
             for (int i = 0; i < nn; i++) {
                 float d = Hk_next[i] - Hk[i];
+                if (Hk_next[i] != Hk[i]) bit_exact = false;
                 diff_conv += d * d;
                 norm_Hk_conv += Hk[i] * Hk[i];
             }
@@ -1829,6 +1850,7 @@ bool AutoLQR::computeGainMatrixASDA()
                 converged = true;
                 lastIterations = iter + 1;
                 lastStepDelta = rel_diff;
+                lastStepIsBitExactZero = bit_exact;
                 lastOutcome = SolveOutcome::Converged;
                 break;
             }
@@ -1837,6 +1859,7 @@ bool AutoLQR::computeGainMatrixASDA()
         if (!converged) {
             lastIterations = maxIterations;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
         }
 
@@ -1918,6 +1941,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f;
+    bool bit_exact = false;
 
     // Alocação de memória
     float* Ak = new float[nn]();
@@ -2033,8 +2057,10 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
             // com norm_Gk/norm_Hk do reescalonamento adaptativo (ASDA),
             // mesmo escopo do laço.
             float diff_conv = 0.0f, norm_Hk_conv = 0.0f;
+            bit_exact = true;
             for (int i = 0; i < nn; i++) {
                 float d = Hk_next[i] - Hk[i];
+                if (Hk_next[i] != Hk[i]) bit_exact = false;
                 diff_conv += d * d;
                 norm_Hk_conv += Hk[i] * Hk[i];
             }
@@ -2056,6 +2082,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
                 converged = true;
                 lastIterations = iter + 1;
                 lastStepDelta = rel_diff;
+                lastStepIsBitExactZero = bit_exact;
                 lastOutcome = SolveOutcome::Converged;
                 break;
             }
@@ -2064,6 +2091,7 @@ bool AutoLQR::computeGainMatrixSDA_Scaled()
         if (!converged) {
             lastIterations = maxIterations;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
         }
 
@@ -2201,6 +2229,7 @@ bool AutoLQR::computeGainMatrixADDA()
     bool converged = false;
     bool breakdown = false;
     float rel_diff = 1.0f;
+    bool bit_exact = false;
 
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -2237,8 +2266,10 @@ bool AutoLQR::computeGainMatrixADDA()
         // Critério de parada: norma de Frobenius relativa — ver
         // comentário equivalente em computeGainMatrixSDA().
         float diff = 0.0f, norm_Hk = 0.0f;
+        bit_exact = true;
         for (int i = 0; i < nn; i++) {
             float d = Hk_next[i] - Hk[i];
+            if (Hk_next[i] != Hk[i]) bit_exact = false;
             diff += d * d;
             norm_Hk += Hk[i] * Hk[i];
         }
@@ -2259,6 +2290,7 @@ bool AutoLQR::computeGainMatrixADDA()
             converged = true;
             lastIterations = iter + 1;
             lastStepDelta = rel_diff;
+            lastStepIsBitExactZero = bit_exact;
             lastOutcome = SolveOutcome::Converged;
             break;
         }
@@ -2267,6 +2299,7 @@ bool AutoLQR::computeGainMatrixADDA()
     if (!converged) {
         lastIterations = maxIterations;
         lastStepDelta = rel_diff;
+        lastStepIsBitExactZero = bit_exact;
         lastOutcome = breakdown ? SolveOutcome::Breakdown : SolveOutcome::Budget;
     }
 
@@ -2373,6 +2406,8 @@ bool AutoLQR::computeGainMatrixADDA_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    lastStepDelta = st.rel_step;
+    lastStepIsBitExactZero = st.bit_exact_zero;
     lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -2445,6 +2480,8 @@ bool AutoLQR::computeGainMatrixASDA_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
 
     lastIterations = st.iterations;
+    lastStepDelta = st.rel_step;
+    lastStepIsBitExactZero = st.bit_exact_zero;
     lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -2533,6 +2570,8 @@ bool AutoLQR::computeGainMatrixSDA_Scaled_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Pq[i], sh);
 
     lastIterations = st.iterations;
+    lastStepDelta = st.rel_step;
+    lastStepIsBitExactZero = st.bit_exact_zero;
     lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -2669,6 +2708,8 @@ bool AutoLQR::computeGainMatrixSDA_SS_Fixed()
     if (P) for (int i = 0; i < n * n; i++) P[i] = q2f(Hk[i], sh);
 
     lastIterations = st.iterations;
+    lastStepDelta = st.rel_step;
+    lastStepIsBitExactZero = st.bit_exact_zero;
     lastOutcome = (st.iterations < maxIterations) ? SolveOutcome::Converged : SolveOutcome::Budget;
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
@@ -2724,6 +2765,8 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
 
     int iters = maxIterations;
+    float relF = 1.0f; // sobrevive ao loop p/ lastStepDelta mesmo sem convergência
+    bool bitExact = false;
     for (int it = 0; it < maxIterations; it++) {
         q_t PA[36], PB[18], ATPA[36], BTPB[9], BTPA[18];
         matmul_q(Pk, Aq, PA, n, n, n, sh, &st);
@@ -2760,14 +2803,16 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
         // de até 36 termos Q13.18 (~2^31 cada) estouraria int64 perto do
         // teto ±8192; em float o custo é desprezível frente às matmuls.
         float diffSq = 0.0f, hSq = 0.0f;
+        bitExact = true;
         for (int i = 0; i < nn; i++) {
+            if (Pnext[i] != Pk[i]) bitExact = false;
             float d = q2f(Pnext[i], sh) - q2f(Pk[i], sh);
             float h = q2f(Pk[i], sh);
             diffSq += d * d;
             hSq += h * h;
         }
         memcpy(Pk, Pnext, sizeof(Pk));
-        float relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
+        relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
         if (relF < (1.0f / (float)invRelTolerance)) { iters = it + 1; break; }
     }
     if (st.overflow) { lastOutcome = SolveOutcome::Breakdown; return false; }
@@ -2791,6 +2836,8 @@ bool AutoLQR::computeGainMatrixIterative_Fixed()
     for (int i = 0; i < nn; i++) P_warm[i] = q2f(Pk[i], sh); // atualiza o warm-start p/ a próxima chamada
 
     lastIterations = iters;
+    lastStepDelta = relF;
+    lastStepIsBitExactZero = bitExact;
     // breakdown já tratado acima (retorna antes de chegar aqui); o que resta
     // distinguir é convergência dentro do orçamento (Converged) contra
     // esgotamento sem breakdown (Budget) — mesma taxonomia dos demais
@@ -2817,6 +2864,10 @@ float AutoLQR::getLastResidual() const {
 
 float AutoLQR::getLastStepDelta() const {
     return lastStepDelta;
+}
+
+bool AutoLQR::getLastStepIsBitExactZero() const {
+    return lastStepIsBitExactZero;
 }
 
 float AutoLQR::getLastFixedPointMaxAbsSeen() const {

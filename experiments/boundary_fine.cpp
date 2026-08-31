@@ -27,6 +27,7 @@
  */
 
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include <math.h>
 #include <esp_timer.h>
@@ -211,6 +212,8 @@ void run() {
     while (!Serial && millis() - t_serial < 3000) {}
     delay(1500);
 
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     for (int m = 0; m < N_METHODS; m++) lqr[m].setStoppingCriterion(BOUNDARY_REL_TOL, BOUNDARY_MAX_ITERS);
 
     Serial.println("# MAPA FINO DAS FRONTEIRAS DE FALHA (Exp. B) -- ver cabecalho do arquivo");

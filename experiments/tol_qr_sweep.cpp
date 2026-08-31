@@ -19,9 +19,11 @@
  * função de τ E da escala dos pesos simultaneamente.
  *
  * Saída CSV pelo serial (921600 baud):
- *   RUN,tau,r_scale,q_rate_scale,traj,k,metodo,time_us,iters,residuo_dare,outcome  (decimado 1:10)
+ *   RUN,tau,r_scale,q_rate_scale,traj,k,metodo,time_us,iters,residuo_dare,outcome,rel_step,bit_exact  (decimado 1:10)
  *   SUMMARY,tau,r_scale,q_rate_scale,metodo,n_converged,n_budget,n_breakdown,count,mean_us,mean_res
  *   outcome: 0=converged 1=budget(censurado, NAO falha numerica) 2=breakdown(overflow/singular)
+ *   rel_step/bit_exact: ver AutoLQR::getLastStepDelta()/getLastStepIsBitExactZero() — acrescentados
+ *   só ao RUN (decimado); SUMMARY não muda para não quebrar consumidores existentes.
  *
  * Consumidor: python/analisa_tol_qr.py (a criar após esta captura).
  * Ver docs/auditoria_solvers_riccati.md, Seção 16, e o plano da campanha
@@ -29,6 +31,7 @@
  */
 
 #include <Arduino.h>
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include <math.h>
 #include <esp_timer.h>
@@ -217,6 +220,8 @@ void run() {
     while (!Serial && millis() - t_serial < 3000) {}
     delay(1500);
 
+
+    buildstamp::print(); // procedencia: commit, build, chip, clock
     Serial.println("# VARREDURA COMBINADA TAU x Q/R (Exp. A) -- ver cabecalho do arquivo");
     Serial.println("# RUN,tau,r_scale,q_rate_scale,traj,k,metodo,time_us,iters,residuo_dare,outcome (decimado 1:10)");
     Serial.println("# SUMMARY,tau,r_scale,q_rate_scale,metodo,n_converged,n_budget,n_breakdown,count,mean_us,mean_res");
@@ -257,6 +262,8 @@ void run() {
                             int iters = lqr[m].getLastIterations();
                             float resid = lqr[m].getLastResidual();
                             AutoLQR::SolveOutcome outcome = lqr[m].getLastOutcome();
+                            float step = lqr[m].getLastStepDelta();
+                            bool bitExact = lqr[m].getLastStepIsBitExactZero();
 
                             GridStats& s = stats[m];
                             s.count++;
@@ -270,9 +277,12 @@ void run() {
 
                             run_line_count++;
                             if (run_line_count % RUN_DECIMATION == 0) {
-                                Serial.printf("RUN,%.0e,%.0e,%.0e,%s,%d,%s,%lld,%d,%.6e,%d\n",
+                                // rel_step/bit_exact acrescentados ao final — SUMMARY (11 campos)
+                                // permanece intacto para não quebrar figuras_artigo_final.py::load_tolqr().
+                                Serial.printf("RUN,%.0e,%.0e,%.0e,%s,%d,%s,%lld,%d,%.6e,%d,%.6e,%d\n",
                                               tau, r_scale, q_rate_scale, Trajectories::TRAJ_NAMES[traj], k,
-                                              METHODS[m], (long long)dt_us, iters, resid, (int)outcome);
+                                              METHODS[m], (long long)dt_us, iters, resid, (int)outcome,
+                                              step, bitExact ? 1 : 0);
                             }
                         }
                         yield();

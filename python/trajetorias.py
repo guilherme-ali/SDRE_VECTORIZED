@@ -164,18 +164,41 @@ def traj_t4_degrau_yaw(t=None):
         t = _tempo()
     tau = 0.15
     periodo = 2.0
-    alvo_phi = np.deg2rad(40.0) * np.sign(np.sin(2.0 * np.pi * t / periodo))
-    alvo_theta = np.deg2rad(40.0) * np.sign(np.cos(2.0 * np.pi * t / periodo))
-    # Conformação de 1a ordem discreta (equivalente a um filtro passa-baixas
-    # de constante de tempo tau) para que phi_dot/theta_dot fiquem finitos
-    # nos degraus, em vez de impulsos na diferenciação central.
+
+    # Alvo derivado da FASE, espelhando `t4RawStep()` de
+    # lib/Trajectories/Trajectories.h.
+    #
+    # A versao anterior tirava o alvo do SINAL de um seno, e o periodo de 2 s
+    # com DT = 6 ms faz a grade cair EXATAMENTE sobre os zeros dessas funcoes
+    # (t = 3.0 s no seno, k = 500; t = 1.5 s no cosseno, k = 250). No zero o
+    # sinal depende da precisao — sinf(3*pi) em float32 da' -8.7e-8 e
+    # sin(3*pi) em float64 da' +3.7e-16, alvos opostos de +-40 graus. Com
+    # alpha = 0.0385 sobre 80 graus de diferenca, um passo separava firmware e
+    # espelho em 3.08 graus, e o erro reaparecia a cada cruzamento: 1734 dos
+    # 10000 pontos, 12.5% de RMS. Isso entrava no e_K como se fosse erro de
+    # solver (4.18e-4 em T4 contra 1.5e-6 no ponto real), inflando a coluna
+    # float da Tabela 1 do artigo de 1.9e-6 para 3.7e-6.
+    #
+    # Replicar float32 aqui reduzia mas nao eliminava o problema: para t grande
+    # o argumento 2*pi*t/2 ~ 155 rad perde resolucao em float32, e a reducao de
+    # argumento do cosf do newlib do ESP32 difere da do numpy — perto de um zero
+    # exato isso desloca o cruzamento. Casar bit-a-bit transcendentais entre
+    # duas libm nao e' alcancavel; a solucao e' nao depender de transcendental.
+    #
+    # A forma abaixo decide pelo intervalo de fase, exata em qualquer precisao.
     alpha = DT / (tau + DT)
-    phi = np.empty_like(t)
-    theta = np.empty_like(t)
-    phi[0], theta[0] = 0.0, 0.0
-    for k in range(1, len(t)):
-        phi[k] = phi[k - 1] + alpha * (alvo_phi[k] - phi[k - 1])
-        theta[k] = theta[k - 1] + alpha * (alvo_theta[k] - theta[k - 1])
+    amp = np.deg2rad(40.0)
+    ciclos = (np.arange(len(t)) * DT) / periodo
+    fase = ciclos - np.floor(ciclos)
+    alvo_phi_v = np.where(fase < 0.5, amp, -amp)                      # sin >= 0
+    alvo_theta_v = np.where((fase < 0.25) | (fase >= 0.75), amp, -amp)  # cos >= 0
+
+    n = len(t)
+    phi = np.zeros(n)
+    theta = np.zeros(n)
+    for k in range(1, n):
+        phi[k] = phi[k - 1] + alpha * (alvo_phi_v[k] - phi[k - 1])
+        theta[k] = theta[k - 1] + alpha * (alvo_theta_v[k] - theta[k - 1])
     psi_dot = 2.0  # rad/s, giro de guinada sustentado
     psi = np.mod(psi_dot * t + np.pi, 2.0 * np.pi) - np.pi  # wrap [-pi, pi]
     return _finalizar(t, phi, theta, psi, regressiva=True)

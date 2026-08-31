@@ -33,6 +33,8 @@ struct Status {
     bool overflow = false;   // saturação/estouro em qualquer conversão ou produto
     int  iterations = 0;     // iterações efetivamente executadas até convergir
     q_t  max_abs_seen = 0;   // maior |valor| visto em qualquer matmul_q (para dimensionar o shift)
+    float rel_step = 1.0f;   // ‖ΔH‖_F/‖H_k‖_F da última iteração executada (ver doubling_loop_q)
+    bool  bit_exact_zero = false; // true se Hkn==Hk elemento-a-elemento (int32) na última iteração
 };
 
 enum class Variant {

@@ -39,6 +39,7 @@ foi capturado.
 | `fronteiras` | `experiments/boundary_fine.cpp` | mapa fino das duas transições de falha (Exp. B) | `serial_boundary_fine_B.txt` | 83 min |
 | `repetibilidade` | `experiments/repeatability.cpp` | variância de tempo no mesmo ponto, 20 repetições (Exp. D) | `serial_repeatability_D.txt` | 58 min |
 | `bateria` | `experiments/benchmark_solvers.cpp` | tempo/erro/convergência dos 12 métodos em 60000 pontos, 6 trajetórias (Exp. 1) | `serial_capture_bateria_v5_6traj.txt` | ~90 min |
+| `benchmark_s3` | `experiments/benchmark_solvers.cpp` (env `benchmark_s3`, ESP32-S3 com FPU) | mesma bateria no S3, p/ compor a Tabela 2 (S2 vs S3, incl. Value iteration) | `s3/serial_capture_bateria_s3.txt` | ~25 min |
 | `voo` | `src/main.cpp` (`DEBUG_MODE=true` temporário) | limite prático de frequência do ciclo completo de voo (Exp. E) | `serial_flightloop_E.txt` | 6 min |
 
 Cada linha corresponde a uma seção de resultados do artigo (`docs/auditoria_solvers_riccati.md`

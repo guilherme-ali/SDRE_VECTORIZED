@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap, SymLogNorm
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "outputs")
@@ -41,6 +42,7 @@ TOLQR = os.path.join(OUT, "serial_tol_qr_sweep_A.txt")
 BOUND = os.path.join(OUT, "serial_boundary_fine_B.txt")
 FLIGHT = os.path.join(OUT, "serial_flightloop_E.txt")
 COBER = os.path.join(OUT, "cobertura_full_v5_6traj.csv")
+TOLSWEEP = os.path.join(OUT, "serial_tolerance_sweep_frobenius.txt")
 
 # Okabe-Ito
 C_FLOAT = "#0072B2"   # azul
@@ -179,6 +181,67 @@ def load_coverage():
             for c in ("rho", "cond_IGP", "normP_F"):
                 d[r["traj"]][c].append(float(r[c]))
     return d
+
+
+def load_tolerance_sweep(path=TOLSWEEP):
+    """RUN,<0a|0b>,tol,traj,k,metodo,time_us,iters,residuo,outcome[,rel_step[,bit_exact]].
+
+    Tolerante a três formatos de captura (10/11/12 campos): capturas antigas
+    não têm rel_step nem bit_exact (pré-instrumentação); capturas de transição
+    têm rel_step mas não bit_exact (o formato encontrado em
+    outputs/serial_tolerance_sweep_frobenius.txt no início da v8 — produzido
+    por um código que não estava mais na árvore); capturas pós-v8 têm os dois.
+    Onde o campo não existe, o valor fica None — os consumidores devem tratar.
+
+    Retorna dict (exp, metodo) -> tol -> lista de dicts com time_us/iters/
+    residuo/outcome/step/bit_exact, para os dois sub-experimentos 0a (família
+    de duplicação) e 0b (value iteration).
+    """
+    out = defaultdict(lambda: defaultdict(list))
+    n_missing_step = 0
+    n_missing_bitexact = 0
+    if not os.path.isfile(path):
+        return out
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.startswith("RUN,"):
+                continue
+            p = line.rstrip("\n").split(",")
+            if len(p) < 10:
+                continue
+            exp = p[1]
+            try:
+                tol = float(p[2])
+                traj, k, metodo = p[3], int(p[4]), p[5]
+                time_us, iters, resid, outcome = int(p[6]), int(p[7]), float(p[8]), int(p[9])
+            except ValueError:
+                continue
+            step = None
+            bit_exact = None
+            if len(p) >= 11:
+                try:
+                    step = float(p[10])
+                except ValueError:
+                    step = None
+            else:
+                n_missing_step += 1
+            if len(p) >= 12:
+                try:
+                    bit_exact = bool(int(p[11]))
+                except ValueError:
+                    bit_exact = None
+            else:
+                n_missing_bitexact += 1
+            out[(exp, metodo)][tol].append({
+                "traj": traj, "k": k, "time_us": time_us, "iters": iters,
+                "resid": resid, "outcome": outcome, "step": step, "bit_exact": bit_exact,
+            })
+    if n_missing_step or n_missing_bitexact:
+        print("  aviso: serial_tolerance_sweep_frobenius.txt tem %d linhas sem rel_step e "
+              "%d sem bit_exact (captura anterior ao firmware instrumentado — "
+              "recapturar com 'python python/run_experiments.py --only tolerancia --force' "
+              "para o painel (c) completo)." % (n_missing_step, n_missing_bitexact))
+    return out
 
 
 def pct(v, q):
@@ -426,6 +489,189 @@ def fig4_tolerance(outdir, tq, cover):
 
 
 # --------------------------------------------------------------------------
+# Fig. 4 v8 — tres paineis: residuo, tempo E o passo medido na terminacao
+# (novo painel (c)), todos da MESMA fonte (serial_tolerance_sweep_frobenius.txt,
+# pesos nominais, tau de 1e-2 a 1e-6), em vez de misturar tolerance_sweep com
+# tol_qr_sweep como a Fig. 4 do v7 fazia (ver plano da v8).
+# --------------------------------------------------------------------------
+_V8_SERIES = [
+    ("SDA_FIXED", "0a", "SDA-fx", C_FIXED, "-", "o"),
+    ("ASDA_FIXED", "0a", "ASDA-fx", "#CC79A7", "-", "s"),
+    ("ITERATIVE_FIXED", "0b", "Value iter.-fx", C_VI, "-", "^"),
+    ("SDA", "0a", "SDA (float)", C_FLOAT, "--", "o"),
+    ("ITERATIVE", "0b", "Value iter. (float)", "#56B4E9", "--", "^"),
+]
+
+
+def _tolsweep_series_stats(ts, exp, metodo, taus):
+    """Para (exp,metodo), agrega por tau: mediana do residuo/passo (só sobre
+    convergidos — mesma convenção do SUMMARY do firmware, ver TolStats::add()
+    em experiments/tolerance_sweep.cpp) e tempo médio (ms), mais a fração de
+    passos bit-exatos (ΔH==0), essa sobre TODAS as tentativas daquele tau."""
+    per_tau = ts.get((exp, metodo), {})
+    out = {}
+    for tau in taus:
+        rows = per_tau.get(tau, [])
+        if not rows:
+            continue
+        conv = [r for r in rows if r["outcome"] == 0]
+        resid = [r["resid"] for r in conv]
+        steps = [r["step"] for r in conv if r["step"] is not None]
+        # bit_exact==None (captura pre-instrumentacao): usa step==0.0 exato como
+        # proxy — um passo de Frobenius relativo em float só é exatamente zero
+        # quando todo ΔH_ij==0.0, o que é precisamente o que bit_exact mede.
+        n_bit_exact = sum(
+            1 for r in rows
+            if r["bit_exact"] or (r["bit_exact"] is None and r["step"] == 0.0)
+        )
+        n_bit_exact_known = sum(1 for r in rows if r["bit_exact"] is not None)
+        out[tau] = {
+            "n_total": len(rows),
+            "n_conv": len(conv),
+            "resid_median": st.median(resid) if resid else None,
+            "time_ms_mean": (st.mean(r["time_us"] for r in conv) / 1000.0) if conv else None,
+            "step_median": st.median(steps) if steps else None,
+            "n_bit_exact": n_bit_exact,
+            "n_bit_exact_known": n_bit_exact_known,
+        }
+    return out
+
+
+def fig4_tolerance_v8(outdir, ts, cover):
+    """3 painéis lado a lado, mesma fonte de dados (tau nominal, 1e-2..1e-6):
+    (a) residuo DARE atingido, (b) tempo médio, (c) passo medido na
+    terminação (novo) — com a faixa do piso analítico e marcadores 'x' nos
+    pontos bit-exatos (ΔH==0 em Q13.18, não representável em escala log)."""
+    taus = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+
+    have_any_step = any(
+        r.get("step") is not None
+        for (exp, metodo) in ts for tau_rows in ts[(exp, metodo)].values() for r in tau_rows
+    )
+    have_any_bitexact = any(
+        r.get("bit_exact") is not None
+        for (exp, metodo) in ts for tau_rows in ts[(exp, metodo)].values() for r in tau_rows
+    )
+    if not have_any_step:
+        print("  aviso: sem rel_step em serial_tolerance_sweep_frobenius.txt — "
+              "painel (c) da fig4_tolerance_v8 ficará vazio. Recapturar com o "
+              "firmware instrumentado (ver docstring de load_tolerance_sweep()).")
+
+    allP = [v for t in cover for v in cover[t]["normP_F"]]
+    floor_lo = 6 * (2.0 ** -18) / max(allP)
+    floor_hi = 6 * (2.0 ** -18) / min(allP)
+
+    # 6.7 in = 170 mm = \textwidth da classe xxidiname: incluida no .tex com
+    # width=170mm, renderiza 1:1, entao 8.5 pt no grafico sai 8.5 pt na pagina.
+    # (O v7 autorava a 6.0 in e incluia com width=108mm — reducao a 71%, que
+    # fazia a fonte cair para ~6 pt na pagina impressa.)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(6.7, 2.45))
+
+    y_floor = 3e-7  # piso do eixo (c) p/ plotar step==0 (bit-exato), não representável em log
+    zero_fracs = []  # (tau, metodo, n_bit_exact, n_total) — p/ nota de rodapé, evita poluir o grafico
+    for series_idx, (metodo, exp, lab, col, ls, mk) in enumerate(_V8_SERIES):
+        s = _tolsweep_series_stats(ts, exp, metodo, taus)
+        xs_a = [t for t in taus if t in s and s[t]["resid_median"] is not None]
+        ys_a = [s[t]["resid_median"] for t in xs_a]
+        if ys_a:
+            ax1.plot(xs_a, ys_a, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+
+        xs_b = [t for t in taus if t in s and s[t]["time_ms_mean"] is not None]
+        ys_b = [s[t]["time_ms_mean"] for t in xs_b]
+        if ys_b:
+            ax2.plot(xs_b, ys_b, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+
+        # painel (c): pontos com passo>0 em escala log normal; passo==0 (bit-exato)
+        # não é representável em log — vai para o piso do eixo com marcador 'x'.
+        xs_pos, ys_pos = [], []
+        xs_zero = []
+        for t in taus:
+            if t not in s or s[t]["step_median"] is None:
+                continue
+            v = s[t]["step_median"]
+            if v > 0:
+                xs_pos.append(t)
+                ys_pos.append(v)
+            else:
+                xs_zero.append(t)
+        if xs_pos:
+            ax3.plot(xs_pos, ys_pos, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+        if xs_zero:
+            # leve jitter vertical por série (log scale) — evita marcadores 'x' de séries
+            # diferentes empilhados exatamente no mesmo pixel no mesmo tau.
+            y_jit = y_floor * (1.0 + 0.22 * series_idx)
+            ax3.plot(xs_zero, [y_jit] * len(xs_zero), ls="none", marker="x", color=col,
+                     ms=6, mew=1.5, zorder=5)
+            for t in xs_zero:
+                zero_fracs.append((t, lab, s[t]["n_bit_exact"], s[t]["n_total"]))
+
+    ax1.set_xscale("log")
+    ax1.set_yscale("log")
+    ax1.invert_xaxis()
+    ax1.set_xlabel(r"requested tolerance $\tau$")
+    ax1.set_ylabel("achieved DARE residual")
+    ax1.set_title("(a) achieved residual", fontsize=8.5)
+
+    ax2.set_xscale("log")
+    # log em y: a iteracao de valor varre 1->120 ms enquanto a familia doubling
+    # se move de 3.5 a 5.9 ms. Em escala linear a subida do doubling (o custo de
+    # apertar tau, que e' o ponto do painel) fica invisivel no rodape do eixo.
+    ax2.set_yscale("log")
+    ax2.invert_xaxis()
+    ax2.axhline(PERIOD_US / 1000.0, color="0.35", ls="--", lw=0.9, zorder=0)
+    # canto inferior direito: abaixo das curvas fixed-point (~4.4 ms) e longe
+    # das de value iteration (>100 ms) — o unico canto do painel sem dado.
+    ax2.text(taus[-1], 1.35, "6.0 ms period", fontsize=6.3,
+             color="0.35", ha="right", va="center")
+    ax2.set_xlabel(r"requested tolerance $\tau$")
+    ax2.set_ylabel("mean solve time (ms)")
+    ax2.set_title("(b) mean solve time", fontsize=8.5)
+
+    ax3.set_xscale("log")
+    ax3.set_yscale("log")
+    ax3.invert_xaxis()
+    ax3.set_ylim(y_floor * 0.6, 1.5)
+    ax3.axhspan(floor_lo, floor_hi, color="0.75", alpha=0.55, lw=0, zorder=0)
+    ax3.plot(taus, taus, color="0.5", ls=":", lw=1.0, zorder=1)
+    ax3.text(taus[1], taus[1] * 1.6, r"$y=\tau$", fontsize=6.5, color="0.4",
+             ha="left", va="bottom", rotation=32)
+    ax3.text(math.sqrt(floor_lo * floor_hi), floor_hi * 2.6, "quantisation\nfloor",
+             fontsize=6.5, color="0.25", ha="center", va="bottom")
+    ax3.set_xlabel(r"requested tolerance $\tau$")
+    ax3.set_ylabel(r"measured step $\|\Delta \mathbf{H}\|_F/\|\mathbf{H}\|_F$")
+    ax3.set_title("(c) step at termination", fontsize=8.5)
+
+    # ticks explicitos: com 3 paineis estreitos o locator automatico do log
+    # mostrava so 1e-3 e 1e-5, escondendo os extremos da varredura.
+    for ax in (ax1, ax2, ax3):
+        ax.set_xticks([1e-2, 1e-4, 1e-6])
+        ax.set_xticks([1e-3, 1e-5], minor=True)
+        ax.set_xticklabels([], minor=True)
+
+    from matplotlib.lines import Line2D
+    h1, l1 = ax1.get_legend_handles_labels()
+    h1 = h1 + [Line2D([], [], ls="none", marker="x", color="0.25", ms=6, mew=1.5)]
+    l1 = l1 + [r"bit-exact ($\Delta H=0$), panel (c)"]
+    fig.legend(h1, l1, loc="lower center", ncol=3, frameon=False, fontsize=7.2,
+               bbox_to_anchor=(0.5, -0.09), columnspacing=1.1, handlelength=2.0,
+               handletextpad=0.4)
+    fig.tight_layout(rect=(0, 0.11, 1, 1))
+    p = os.path.join(outdir, "fig4_tolerance_v8.pdf")
+    fig.savefig(p)
+    plt.close(fig)
+    print("  ok", p)
+    if not have_any_bitexact:
+        print("  aviso: sem bit_exact em serial_tolerance_sweep_frobenius.txt — os marcadores "
+              "'x' do painel (c) usaram step==0.0 como proxy (equivalente na prática, mas a "
+              "fração relatada abaixo é inferida, não medida diretamente). Recapturar para o dado real.")
+    if zero_fracs:
+        print("  passos bit-exatos (painel c, fora do grafico p/ nao poluir):")
+        for t, lab, n_be, n_tot in zero_fracs:
+            print("    tau=%.0e  %-16s  %d/%d" % (t, lab, n_be, n_tot))
+    return floor_lo, floor_hi
+
+
+# --------------------------------------------------------------------------
 # Fig. 5 — envelope seguro das matrizes de peso
 # --------------------------------------------------------------------------
 def fig5_safety(outdir, agg):
@@ -474,6 +720,157 @@ def fig5_safety(outdir, agg):
     fig.savefig(p)
     plt.close(fig)
     print("  ok", p)
+
+
+# --------------------------------------------------------------------------
+# Fig. 5 (malha fechada) — rastreamento e penalidade de custo.
+#
+# A versao anterior deste PDF (Figures/fig5_closed_loop.pdf, usada no v7) NAO
+# tinha script no repositorio que a reproduzisse, e trazia "<= 0.26%" fixo no
+# titulo, vindo de uma rodada antiga (malha_fechada_trajetorias_v4.csv). Esta
+# funcao regenera a figura a partir dos dados correntes:
+#   outputs/malha_fechada_v6_6traj.csv      penalidade por trajetoria (painel b)
+#   outputs/malha_fechada_serie_T2.csv      serie temporal de T2 (painel a),
+#     produzida por python/malha_fechada_trajetorias.py --series-traj T2_figura8
+# O limite nao e' mais escrito a mao: e' calculado do proprio dado e impresso.
+# --------------------------------------------------------------------------
+MALHA = os.path.join(OUT, "malha_fechada_v6_6traj.csv")
+# T3 (chirp), nao T2: T2 e' a trajetoria mais facil das seis (RMS 0.098 deg nas
+# duas aritmeticas), onde as curvas coincidem trivialmente e o grafico nao prova
+# nada. T3 e' a mais exigente entre as de modelo discreto fiel, e e' a mesma em
+# que o artigo ancora a alegacao de previsibilidade — usar a mesma trajetoria
+# nas duas figuras mantem o argumento coerente.
+SERIE_TRAJ = "T3_chirp"
+SERIE_CSV = os.path.join(OUT, "malha_fechada_serie_%s.csv" % SERIE_TRAJ)
+
+# Ordem de linhas do heatmap do painel (b). Nao ha cor por controlador aqui: a
+# versao em barras agrupadas (6 controladores x 5 trajetorias = 30 barras) era
+# ilegivel — o leitor nao conseguia casar barra com trajetoria, e a paleta
+# Okabe-Ito nao tem 6 tons categoricos seguros. O heatmap troca "casar cor com
+# legenda" por "ler o numero na celula", e ainda comporta as SEIS trajetorias.
+FX_CTRLS = [("SDA_FIXED", "SDA-fx"),
+            ("SDA_SS_FIXED", "SDA-SS-fx"),
+            ("ASDA_FIXED", "ASDA-fx"),
+            ("SDA_SCALED_FIXED", "SDA-Scaled-fx"),
+            ("ADDA_FIXED", "ADDA-fx"),
+            ("ITERATIVE_FIXED", "Value iter.-fx")]
+
+# Divergente Okabe-Ito: azul (negativo) -> cinza neutro -> vermelhao (positivo).
+# Mesmos polos ja usados no artigo para float/fixed; validados em
+# scripts/validate_palette.js (DeltaE 21.9 protan, 31.2 visao normal, todos os
+# checks PASS). Midpoint neutro, nao um terceiro matiz.
+_DIVERGING = LinearSegmentedColormap.from_list(
+    "okabe_div", ["#0072B2", "#8FBFDD", "#F0EFEC", "#EBA77C", "#D55E00"])
+
+
+# Janela escolhida a partir do dado, nao a olho: em 12-14.5 s o chirp esta a
+# ~1.9 Hz (cerca de 5 ciclos, ainda legiveis), o atraso de rastreamento e' 5.2 deg
+# sobre uma amplitude de 27.7 deg — visivel, mostrando o controlador sob carga —
+# enquanto a distancia float64<->Q13.18 e' 0.12 deg, 2% disso. Janelas mais tarde
+# (>=28 s) empilham 8+ ciclos e o atraso passa de 13 deg, o que desvia a atencao
+# do ponto do painel; janelas antes de 8 s sao faceis demais.
+def fig5_closed_loop(outdir, window=(12.0, 14.5)):
+    if not (os.path.isfile(MALHA) and os.path.isfile(SERIE_CSV)):
+        print("  [pulado] fig5_closed_loop: faltam %s e/ou %s "
+              "(rodar python/malha_fechada_trajetorias.py)" %
+              (os.path.basename(MALHA), os.path.basename(SERIE_CSV)))
+        return None
+
+    J = defaultdict(dict)
+    with open(MALHA, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            J[r["traj"]][r["controller"]] = float(r["J_total"])
+
+    ser = defaultdict(list)
+    with open(SERIE_CSV, encoding="utf-8") as f:
+        rd = csv.DictReader(f)
+        for r in rd:
+            for c in rd.fieldnames:
+                ser[c].append(float(r[c]))
+
+    # 6.0 in como as demais figuras: incluidas todas com a mesma largura no .tex,
+    # autorar todas no mesmo tamanho mantem a fonte impressa igual entre elas.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.0, 2.32),
+                                   gridspec_kw=dict(width_ratios=[1.0, 1.30]))
+
+    # ---- (a) rastreamento numa janela do chirp -------------------------------
+    # Janela curta, nao os 60 s: a 60 s o chirp vira um borrao solido e nada se
+    # le. A janela default fica na metade alta da varredura, onde rastrear e'
+    # mais dificil — se as duas aritmeticas coincidem ali, coincidem no resto.
+    t = np.array(ser["t"])
+    m = (t >= window[0]) & (t <= window[1])
+    ax1.plot(t[m], np.array(ser["phi_ref_deg"])[m], color="0.30", lw=2.4,
+             solid_capstyle="round", label="commanded", zorder=1)
+    if "phi_SDA_float64_deg" in ser:
+        ax1.plot(t[m], np.array(ser["phi_SDA_float64_deg"])[m], color=C_FLOAT,
+                 lw=1.3, label="float64", zorder=2)
+    if "phi_SDA_FIXED_deg" in ser:
+        ax1.plot(t[m], np.array(ser["phi_SDA_FIXED_deg"])[m], color=C_FIXED,
+                 lw=1.3, ls=(0, (3, 2)), label="Q13.18 (SDA-fx)", zorder=3)
+    ax1.set_xlabel("time (s)")
+    ax1.set_ylabel("roll (deg)")
+    ax1.set_title("(a) tracking on T3 (chirp), %g-%g s" % window, fontsize=8.5)
+    ax1.set_xlim(*window)
+    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.13), ncol=3,
+               frameon=False, fontsize=6.8, handlelength=1.9,
+               columnspacing=1.0, handletextpad=0.4)
+
+    # ---- (b) heatmap da penalidade de custo, TODAS as seis trajetorias -------
+    keys = [k for k, _ in FX_CTRLS]
+    labs = [l for _, l in FX_CTRLS]
+    M = np.full((len(keys), len(TRAJS)), np.nan)
+    for i, k in enumerate(keys):
+        for j, t_ in enumerate(TRAJS):
+            ref, cur = J[t_].get("SDA_float64"), J[t_].get(k)
+            if ref and cur:
+                M[i, j] = 100.0 * (cur / ref - 1.0)
+
+    faithful = [j for j, t_ in enumerate(TRAJS) if t_ != "T6_taxa_alta"]
+    worst_dbl = np.nanmax(np.abs(M[:-1, faithful]))   # doubling, T1-T5
+    worst_all = np.nanmax(np.abs(M[:, faithful]))     # + value iteration, T1-T5
+
+    # SymLog: T1-T5 vivem em +-0.44%, T6 chega a +8.6%. Numa escala linear T6
+    # satura tudo e T1-T5 viram uma mancha uniforme; em symlog os dois regimes
+    # coexistem. A cor e' apoio ao padrao — o numero exato esta em cada celula.
+    norm = SymLogNorm(linthresh=0.5, vmin=-9, vmax=9, base=10)
+    im = ax2.imshow(M, cmap=_DIVERGING, norm=norm, aspect="auto")
+    ax2.set_xticks(range(len(TRAJS)))
+    ax2.set_xticklabels([TRAJ_LBL[t_].split()[0] for t_ in TRAJS], fontsize=7.5)
+    ax2.set_yticks(range(len(labs)))
+    ax2.set_yticklabels(labs, fontsize=7.2)
+    ax2.set_title(r"(b) $\Delta J/J_\mathrm{ref}$ (%) vs. float64", fontsize=8.5)
+    ax2.set_xticks(np.arange(-0.5, len(TRAJS), 1), minor=True)
+    ax2.set_yticks(np.arange(-0.5, len(labs), 1), minor=True)
+    ax2.grid(which="minor", color="white", linewidth=1.1)
+    ax2.grid(which="major", visible=False)
+    ax2.tick_params(which="minor", length=0)
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            if np.isnan(M[i, j]):
+                continue
+            v = M[i, j]
+            # tinta escura sobre celula clara, branca sobre celula saturada
+            ink = "white" if abs(v) > 2.0 else "0.12"
+            if abs(v) >= 1.0:
+                s = "%+.1f" % v
+            elif abs(v) < 0.005:
+                s = "0.00"          # evita o "-0.00" que o %+.2f produzia
+            else:
+                s = "%+.2f" % v
+            ax2.text(j, i, s, ha="center", va="center", fontsize=6.3, color=ink)
+    # T6 e' qualitativamente diferente (modelo discreto menos fiel): marcado
+    # com uma moldura, em vez de simplesmente omitido como na versao anterior.
+    j6 = TRAJS.index("T6_taxa_alta")
+    ax2.add_patch(plt.Rectangle((j6 - 0.5, -0.5), 1, len(labs), fill=False,
+                                 edgecolor="0.25", lw=1.3, ls=(0, (3, 2)), zorder=5))
+    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    p = os.path.join(outdir, "fig5_closed_loop_v8.pdf")
+    fig.savefig(p)
+    plt.close(fig)
+    print("  ok", p)
+    print("     |dJ/J| maximo T1-T5: doubling %.3f%%, incluindo value iter. %.3f%%"
+          % (worst_dbl, worst_all))
+    return worst_dbl, worst_all
 
 
 # --------------------------------------------------------------------------
@@ -530,6 +927,10 @@ def main():
                                         r"\DINAME_2027\artigo_diname\Figures")
     ap.add_argument("--with-fig2", action="store_true",
                     help="regenera a Fig. 2 (barras de tempo), removida do v5")
+    ap.add_argument("--legacy-fig4", action="store_true",
+                    help="pula a fig4_tolerance_v8 (3 paineis, painel (c) novo) e gera só a Fig. 4 do v7")
+    ap.add_argument("--no-fig4-v7", action="store_true",
+                    help="pula a Fig. 4 do v7 (2 paineis) — só a v8")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -539,6 +940,7 @@ def main():
     agg = load_boundary()
     proc, stages, hist_tuple = load_flight()
     cover = load_coverage()
+    ts = load_tolerance_sweep()
     print("gerando figuras em", args.outdir)
     fig1_envelope(args.outdir, cover)
     # Fig. 2 (barras de tempo) removida no v5: repetia as duas primeiras colunas
@@ -546,10 +948,15 @@ def main():
     if args.with_fig2:
         fig2_timing(args.outdir, tall)
     fig3_predictability(args.outdir, tt, it)
-    lo, hi = fig4_tolerance(args.outdir, tq, cover)
+    if not args.no_fig4_v7:
+        lo, hi = fig4_tolerance(args.outdir, tq, cover)
+        print("piso de quantizacao medido (Fig.4 v7): [%.2e, %.2e]" % (lo, hi))
+    if not args.legacy_fig4:
+        lo8, hi8 = fig4_tolerance_v8(args.outdir, ts, cover)
+        print("piso de quantizacao medido (Fig.4 v8): [%.2e, %.2e]" % (lo8, hi8))
+    fig5_closed_loop(args.outdir)
     fig5_safety(args.outdir, agg)
     fig6_flight(args.outdir, proc, stages, hist_tuple)
-    print("piso de quantizacao medido: [%.2e, %.2e]" % (lo, hi))
 
 
 if __name__ == "__main__":

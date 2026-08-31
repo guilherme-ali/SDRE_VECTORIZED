@@ -8,3 +8,14 @@ logs
 *.pyc
 /build/
 /outputs/
+
+# Pacote Zenodo: 25 MB de CSV DERIVADO das capturas de outputs/. Regenerado por
+# `python python/exporta_dados_revisores.py` — versionar o derivado duplicaria
+# o dado bruto e envelheceria em silencio.
+/zenodo_diname2027/
+
+# Backups locais feitos a mao antes de recapturas (outputs/ ja e' ignorado,
+# mas backups de fonte nao devem escapar).
+*.ANTES
+*_ANTES.txt
+*_SEMCARIMBO.txt

@@ -1,0 +1,19 @@
+{
+  "_comentario": [
+    "Configuracao local da campanha de medicao. Mantem fora do codigo tudo que",
+    "e' especifico DESTA maquina ou DESTA rodada de escrita — o repositorio",
+    "guarda firmware, dados e analise, nao a versao do artigo em que eles",
+    "estao sendo usados. Antes disto, python/run_experiments.py tinha o nome do",
+    ".tex embutido no fonte e ficou apontando para uma versao antiga sem que",
+    "ninguem notasse, porque o passo de PDF quase sempre roda com --no-pdf.",
+    "",
+    "artigo_dir : pasta do documento a recompilar apos a campanha; null desliga",
+    "             o passo de PDF (o repositorio continua util sem ele).",
+    "artigo_tex : nome do .tex; 'auto' escolhe o de maior versao vN encontrado",
+    "             em artigo_dir, o que sobrevive a criacao de um v9.",
+    "",
+    "Sobrescrever sem editar este arquivo: SDRE_ARTIGO_DIR / SDRE_ARTIGO_TEX."
+  ],
+  "artigo_dir": "G:\\Meu Drive\\ACADEMICO\\Mestrado\\EVENTOS\\DINAME_2027\\artigo_diname",
+  "artigo_tex": "auto"
+}

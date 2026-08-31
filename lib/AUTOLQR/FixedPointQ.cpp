@@ -171,7 +171,9 @@ FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Var
         // desprezível frente às 8 matmuls (1728 multiply-adds) da iteração
         // — mesma lógica já usada no reescalonamento do ASDA acima.
         float diffSq = 0.0f, hSq = 0.0f;
+        bool bitExact = true;
         for (int i = 0; i < nn; i++) {
+            if (Hkn[i] != Hk[i]) bitExact = false;
             float d = q2f(Hkn[i], sh) - q2f(Hk[i], sh);
             float h = q2f(Hk[i], sh);
             diffSq += d * d;
@@ -181,6 +183,8 @@ FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Var
         memcpy(Gk, Gkn, nn * sizeof(q_t));
         memcpy(Hk, Hkn, nn * sizeof(q_t));
         float relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
+        st->rel_step = relF;
+        st->bit_exact_zero = bitExact;
         if (relF < (1.0f / (float)invRelTolerance)) { st->iterations = it + 1; break; }
     }
 

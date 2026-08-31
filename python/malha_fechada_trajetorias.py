@@ -38,6 +38,7 @@ import math
 import os
 import sys
 import time
+from collections import defaultdict
 
 import numpy as np
 
@@ -66,6 +67,8 @@ def simulate_closed_loop(traj_dados, controller_name, gain_fn):
                   traj_dados["p"][0], traj_dados["q"][0], traj_dados["r"][0]])
 
     err_hist = np.zeros((N, 3))  # phi,theta,psi
+    att_hist = np.zeros((N, 3))  # atitude REALIZADA (phi,theta,psi) — Fig. 5(a)
+    ref_hist = np.zeros((N, 3))  # atitude COMANDADA, para o mesmo grafico
     J_total = 0.0
     K_prev = None
     n_fallback = 0
@@ -77,6 +80,8 @@ def simulate_closed_loop(traj_dados, controller_name, gain_fn):
         e = x - x_ref
         e[2] = angle_diff(x[2], x_ref[2])
         err_hist[k] = e[:3]
+        att_hist[k] = x[:3]
+        ref_hist[k] = x_ref[:3]
 
         # Linearizacao no estado ATUAL (extended linearization / SDRE classico)
         phi_c = max(min(x[0], math.radians(75)), math.radians(-75))
@@ -111,6 +116,8 @@ def simulate_closed_loop(traj_dados, controller_name, gain_fn):
         "J_total": J_total,
         "fallback_rate": n_fallback / max(n_total, 1),
         "n_fallback": n_fallback, "n_total": n_total,
+        # séries (não vão para o CSV agregado; usadas só pelo dump de --series-traj)
+        "_att_hist": att_hist, "_ref_hist": ref_hist,
     }
 
 
@@ -132,9 +139,16 @@ CONTROLLERS.update(FIXED_SOLVERS)
 STATEFUL_CONTROLLER_FACTORIES = {"ITERATIVE_FIXED": lambda: IterativeFixedGain()}
 
 
-def main(saida):
+def main(saida, series_trajs=None, series_dir=None, series_ctrls=("SDA_float64", "SDA_FIXED")):
+    """series_trajs/series_dir: além do CSV agregado, grava a série temporal de
+    atitude comandada vs. realizada de CADA trajetória listada (um CSV por
+    trajetória), para os controladores em series_ctrls. É a fonte do painel (a)
+    da figura de malha fechada, que antes não tinha script que a reproduzisse.
+    Grava todas por padrão: a simulação leva ~17 min e escolher a trajetória a
+    exibir depois não deve exigir rodá-la de novo."""
     dados = trj.gerar_todas()
     rows = []
+    series = defaultdict(dict)   # traj -> ctrl -> (att, ref, t)
     t_start = time.time()
     for traj_nome, d in dados.items():
         for ctrl_nome, fn in CONTROLLERS.items():
@@ -143,6 +157,8 @@ def main(saida):
             res["traj"] = traj_nome
             res["tempo_sim_s"] = time.time() - t0
             rows.append(res)
+            if series_trajs and traj_nome in series_trajs and ctrl_nome in series_ctrls:
+                series[traj_nome][ctrl_nome] = (res["_att_hist"], res["_ref_hist"], d["t"])
             print("%-14s %-16s rms_total=%.3f deg  J=%.4e  fallback=%d/%d  (%.1fs)" % (
                 traj_nome, ctrl_nome, res["rms_total_deg"], res["J_total"],
                 res["n_fallback"], res["n_total"], res["tempo_sim_s"]))
@@ -164,11 +180,31 @@ def main(saida):
     fieldnames = ["traj", "controller", "rms_phi_deg", "rms_theta_deg", "rms_psi_deg",
                   "rms_total_deg", "J_total", "n_fallback", "n_total", "fallback_rate", "tempo_sim_s"]
     with open(saida, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         for row in rows:
             w.writerow(row)
     print("\ngravado: %s (%d linhas, %.1f min totais)" % (saida, len(rows), (time.time() - t_start) / 60.0))
+
+    if series_dir and series:
+        os.makedirs(series_dir, exist_ok=True)
+        for traj_nome, per_ctrl in series.items():
+            any_ctrl = next(iter(per_ctrl))
+            t_vec = per_ctrl[any_ctrl][2]
+            cols = ["t", "phi_ref_deg", "theta_ref_deg", "psi_ref_deg"]
+            for c in per_ctrl:
+                cols += ["phi_%s_deg" % c, "theta_%s_deg" % c, "psi_%s_deg" % c]
+            out = os.path.join(series_dir, "malha_fechada_serie_%s.csv" % traj_nome)
+            with open(out, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(cols)
+                ref = per_ctrl[any_ctrl][1]
+                for k in range(len(t_vec)):
+                    row = [t_vec[k]] + [math.degrees(v) for v in ref[k]]
+                    for c in per_ctrl:
+                        row += [math.degrees(v) for v in per_ctrl[c][0][k]]
+                    w.writerow(["%.6g" % v for v in row])
+            print("gravado: %s (%s)" % (out, ", ".join(per_ctrl)))
 
     print("\n=== Degradacao relativa (fixed vs. SDA_float64), por trajetoria ===")
     by_traj = {}
@@ -191,5 +227,10 @@ def main(saida):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--saida", default=os.path.join(os.path.dirname(__file__), "..", "outputs", "malha_fechada_v6_6traj.csv"))
+    ap.add_argument("--series-trajs", default="all",
+                     help="trajetorias cuja serie temporal e' exportada (lista por virgula, ou 'all')")
+    ap.add_argument("--series-dir", default=os.path.join(os.path.dirname(__file__), "..", "outputs"))
     args = ap.parse_args()
-    main(args.saida)
+    todas = list(trj.gerar_todas().keys())
+    trajs = todas if args.series_trajs == "all" else [t.strip() for t in args.series_trajs.split(",") if t.strip()]
+    main(args.saida, series_trajs=set(trajs), series_dir=args.series_dir)

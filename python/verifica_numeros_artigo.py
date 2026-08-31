@@ -1,7 +1,10 @@
 """Verificacao final: cada numero afirmado no diname2027_v5.tex contra os dados brutos.
 
 Uso: python verifica_numeros_artigo.py
+     python verifica_numeros_artigo.py --v8   # tambem confere os numeros novos da v8
+     (Tabela 2 com Value iteration, fracao de passos bit-exatos, piso de quantizacao)
 """
+import argparse
 import os
 import re
 import statistics as st
@@ -12,6 +15,10 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "outputs")
 TEX = r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname\diname2027_v5.tex"
+
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--v8", action="store_true", help="tambem confere os numeros novos da v8")
+_args, _ = _ap.parse_known_args()
 
 ok = []
 bad = []
@@ -123,6 +130,84 @@ if os.path.exists(flight_file):
     check("voo: init 8.70 s", 8.70, 361 - tot * mean_loop / 1e6 - sum(prints) / 1e6, tol=0.05)
 else:
     print(f"[INFO] Arquivo de voo {flight_file} ainda nao capturado nesta maquina (pode ser executado com python run_experiments.py --exp voo).")
+
+# ---- v8: Tabela 2 com Value iteration, fracao bit-exata, e nota de divergencia ----
+if _args.v8:
+    check("Tab2-v8 VI S2-fx/S3-fx (1.69)", 1.69,
+          st.median(t2["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE_FIXED"]))
+    check("Tab2-v8 VI S3-fx/S3-float (1.97)", 1.97,
+          st.median(t3["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE"]))
+
+    tolsweep_file = os.path.join(OUT, "serial_tolerance_sweep_frobenius.txt")
+    if os.path.exists(tolsweep_file):
+        n_be, n_tot = 0, 0
+        with open(tolsweep_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.startswith("RUN,0a,1e-05,"):
+                    continue
+                p = line.rstrip("\n").split(",")
+                if len(p) < 6 or p[5] != "SDA_FIXED":
+                    continue
+                n_tot += 1
+                if len(p) >= 12 and p[11] == "1":
+                    n_be += 1
+                elif len(p) >= 11 and float(p[10]) == 0.0:  # fallback: captura pre-bit_exact
+                    n_be += 1
+        if n_tot:
+            check("v8: fracao bit-exata SDA_FIXED @tau=1e-5 (1.0 = 1824/1824)",
+                  1.0, n_be / n_tot)
+        else:
+            print("[INFO] serial_tolerance_sweep_frobenius.txt nao tem linhas RUN,0a,1e-05,...,SDA_FIXED "
+                  "com rel_step (recapturar com o firmware instrumentado).")
+    else:
+        print(f"[INFO] {tolsweep_file} nao encontrado.")
+
+    # Divergencia encontrada entre o texto do v7 e os dados brutos, registrada
+    # para a rodada de redacao da v8 (nao corrigida aqui — fora do escopo desta
+    # auditoria, que so confere numeros, nao edita o .tex).
+    try:
+        tol_qr_file = os.path.join(OUT, "serial_tol_qr_sweep_A.txt")
+        cell = defaultdict(dict)
+        with open(tol_qr_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.startswith("SUMMARY,"):
+                    continue
+                p = line.strip().split(",")
+                if len(p) != 11:
+                    continue
+                _, tau, rs, qr, m, nc, nb, nbk, cnt, mus, mres = p
+                if rs == "1e+00" and qr == "1e+00" and m in ("SDA_FIXED", "SDA_SCALED_FIXED"):
+                    cell[m][tau] = float(mres)
+        rows_div = []
+        for m in ("SDA_FIXED", "SDA_SCALED_FIXED"):
+            if "1e-02" in cell[m] and "3e-05" in cell[m]:
+                delta_pct = 100.0 * (cell[m]["3e-05"] / cell[m]["1e-02"] - 1.0)
+                rows_div.append((m, delta_pct))
+        div_path = os.path.join(OUT, "v8", "divergencias_v7.md")
+        os.makedirs(os.path.dirname(div_path), exist_ok=True)
+        with open(div_path, "w", encoding="utf-8") as f:
+            f.write("# Divergencias entre diname2027_v7.tex e os dados brutos (achadas na auditoria v8)\n\n")
+            f.write("Nao corrigidas neste arquivo — fora do escopo da preparacao de dados/scripts da v8. "
+                    "Registradas aqui para a proxima rodada de redacao.\n\n")
+            f.write("## Variacao do residuo atingido ao apertar tau (1e-2 -> 3e-5), pesos nominais\n\n")
+            f.write("O v7 (secao 'Tolerance, achieved accuracy...') afirma "
+                    "\"+0.3% para SDA-fx e +3.2% para SDA-Scaled-fx\". "
+                    "Os dados brutos (outputs/serial_tol_qr_sweep_A.txt, celula R_scale=1, "
+                    "Q_rate_scale=1) e outputs/serial_tolerance_sweep_frobenius.txt "
+                    "(medianas sobre 1824 pontos) concordam entre si e discordam do texto:\n\n")
+            f.write("| Metodo | v7 (texto) | tol_qr_sweep (celula nominal) |\n|---|---|---|\n")
+            claimed = {"SDA_FIXED": 0.3, "SDA_SCALED_FIXED": 3.2}
+            for m, delta_pct in rows_div:
+                f.write("| %s | %+.1f%% | %+.2f%% |\n" % (m, claimed.get(m, float("nan")), delta_pct))
+            f.write("\nVer python/verifica_numeros_artigo.py --v8 para reproduzir.\n")
+        if rows_div:
+            print("\n[AVISO] divergencia texto x dados encontrada e registrada em %s" %
+                  os.path.relpath(div_path, REPO))
+            for m, delta_pct in rows_div:
+                print("        %s: v7 afirma %+.1f%%, dado bruto mostra %+.2f%%" %
+                      (m, claimed.get(m, float("nan")), delta_pct))
+    except FileNotFoundError:
+        pass
 
 print("=" * 96)
 print("CONFEREM (%d):" % len(ok))

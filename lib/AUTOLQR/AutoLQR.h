@@ -208,6 +208,19 @@ public:
     float getLastStepDelta() const;
 
     /**
+     * @brief Indica se a última iteração executada foi um ponto fixo bit-exato do
+     *        formato Q13.18: todos os elementos de ΔH = H_{k+1}-H_k eram identicamente
+     *        zero em nível de bit (comparação de int32, não de valor convertido a float).
+     *        Distingue o "sucesso silencioso" do piso de quantização (qualquer τ é
+     *        declarado atingido) de uma parada legítima acima do piso — ver
+     *        docs/auditoria_solvers_riccati.md e a Eq. do piso no artigo.
+     * @return true se ΔH==0 bit-a-bit na última iteração; false nos demais casos,
+     *         inclusive para os métodos float (não instrumentados por padrão) e para
+     *         chamadas que não convergiram.
+     */
+    bool getLastStepIsBitExactZero() const;
+
+    /**
      * @brief Maior |valor| real visto em qualquer produto matricial da última chamada
      *        bem-sucedida de um método `_FIXED` — mede a margem até o teto ±8192 do
      *        Q13.18 (ver docs/auditoria_solvers_riccati.md, Seção 9/10).
@@ -258,6 +271,7 @@ private:
                                  ///< e só uma vez por solve (ver docs/auditoria_solvers_riccati.md,
                                  ///< Seção 12).
     float lastStepDelta; ///< Critério interno de parada da última iteração (ver getLastStepDelta())
+    bool lastStepIsBitExactZero; ///< ver getLastStepIsBitExactZero()
     float lastFixedPointMaxAbsSeen; ///< Maior |valor| real visto em qualquer matmul_q na última
                                      ///< chamada bem-sucedida de um método _FIXED (unidades reais,
                                      ///< não o inteiro Q-format; 0 se o método não é _FIXED, se
