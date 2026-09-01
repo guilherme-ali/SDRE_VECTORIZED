@@ -41,7 +41,12 @@ ZENODO = os.path.join(REPO, "zenodo_diname2027")
 # DOI reservado no Zenodo para este deposito. E' a mesma string que aparece na
 # secao "Data and Code Availability" do artigo; python/auditoria.py confere que
 # o .tex nao voltou a carregar um marcador no lugar dela.
-DOI = "10.5281/zenodo.22234764"
+DOI = "10.5281/zenodo.22236293"
+# DOI conceito: resolve sempre para a versao mais recente do deposito. A v1
+# (zenodo.22236199) foi criada pela integracao automatica GitHub->Zenodo e
+# trazia so' o zip do repositorio, sem as capturas brutas -- ver README do
+# deposito.
+DOI_CONCEITO = "10.5281/zenodo.22236198"
 
 RAW = os.path.join(ZENODO, "raw")
 DERIVED = os.path.join(ZENODO, "derived")
@@ -313,7 +318,9 @@ def escreve_readme(commit, codigo):
     A("*Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less")
     A("Hardware: Rigid-Body Dynamics, Quantisation Limits and Cost Predictability*.")
     A("")
-    A("**DOI:** %s" % DOI)
+    A("**DOI desta versao:** %s" % DOI)
+    A("")
+    A("**DOI conceito** (sempre a versao mais recente): %s" % DOI_CONCEITO)
     A("")
     A("Para citar este conjunto de dados use o DOI acima; o artigo o referencia na")
     A("secao *Data and Code Availability*.")

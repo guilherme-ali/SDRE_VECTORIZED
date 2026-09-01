@@ -1,6 +1,6 @@
 # SDRE_VECTORIZED
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22234764.svg)](https://doi.org/10.5281/zenodo.22234764)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22236293.svg)](https://doi.org/10.5281/zenodo.22236293)
 [![Código: MIT](https://img.shields.io/badge/c%C3%B3digo-MIT-blue.svg)](LICENSE)
 [![Dados: CC BY 4.0](https://img.shields.io/badge/dados-CC%20BY%204.0-lightgrey.svg)](LICENSE-DATA)
 
@@ -448,7 +448,7 @@ O repositório traz um [`CITATION.cff`](CITATION.cff) — no GitHub, use o botã
 
 > Bassani, G. A. A.; Cardoso, R.; Correa, D. P. F. (2026).
 > *Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
-> Hardware: data and code.* Zenodo. <https://doi.org/10.5281/zenodo.22234764>
+> Hardware: data and code.* Zenodo. <https://doi.org/10.5281/zenodo.22236293>
 
 ## Publicação
 
