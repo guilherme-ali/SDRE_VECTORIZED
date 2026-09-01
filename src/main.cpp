@@ -7,6 +7,7 @@
  * Comunicacao via WiFi/UDP (CRTP, compativel com app ESP-Drone da Espressif).
  */
 
+#include "BuildStamp.h"
 #include <AutoLQR.h>
 #include "PIDController.h"
 #include <MadgwickAHRS.h>
@@ -337,6 +338,12 @@ void setup() {
 
     Serial.begin(115200);
     delay(1000);
+
+    // Procedencia: commit, build, chip e clock, na propria captura serial.
+    // O firmware de voo alimenta a figura do ciclo completo do artigo, entao
+    // precisa do mesmo carimbo dos firmwares de experimento — sem ele a
+    // captura de voo era a unica das dez sem procedencia verificavel.
+    buildstamp::print();
 
     // Persistencia de telemetria: ESP32 reseta quando o Serial Monitor abre, entao
     // salvamos o buffer em LittleFS ao desarmar e recarregamos no boot.
