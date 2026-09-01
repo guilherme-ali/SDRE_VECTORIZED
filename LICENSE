@@ -20,19 +20,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----------------------------------------------------------------------------
-
-NOTA SOBRE O ESCOPO
-
-Esta licenca MIT cobre o SOFTWARE deste repositorio: o firmware de voo (`src/`),
-os firmwares de experimento (`experiments/`), as bibliotecas C++ (`lib/`), os
-scripts Python (`python/`, `scripts/`) e os testes (`test/`).
-
-Os DADOS DE MEDICAO -- as capturas seriais brutas, os CSVs derivados delas e as
-figuras geradas a partir delas -- sao distribuidos sob Creative Commons
-Attribution 4.0 International (CC BY 4.0). Ver o arquivo LICENSE-DATA.
-
-Dependencias de terceiros (Arduino-ESP32, ArduinoEigen, Madgwick, Adafruit
-MPU6050, e as bibliotecas Python listadas em requirements.txt) mantem cada uma a
-sua propria licenca; nenhuma delas e' redistribuida por este repositorio.

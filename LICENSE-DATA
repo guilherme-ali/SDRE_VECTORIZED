@@ -19,7 +19,17 @@ O QUE ESTA COBERTO
   - as figuras geradas a partir desses dados.
 
 O SOFTWARE que produziu e analisa esses dados esta sob licenca MIT -- ver o
-arquivo LICENSE.
+arquivo LICENSE, que cobre: o firmware de voo (`src/`), os firmwares de
+experimento (`experiments/`), as bibliotecas C++ (`lib/`), os scripts Python
+(`python/`, `scripts/`) e os testes (`test/`).
+
+O arquivo LICENSE traz o texto MIT sem acrescimos, de proposito: detectores de
+licenca (o do GitHub inclusive) deixam de reconhecer a licenca quando ha texto
+extra no arquivo, e passam a exibir "NOASSERTION".
+
+Dependencias de terceiros (Arduino-ESP32, ArduinoEigen, Madgwick, Adafruit
+MPU6050, e as bibliotecas Python de requirements.txt) mantem cada uma a sua
+propria licenca; nenhuma delas e' redistribuida por este repositorio.
 
 ---------------------------------------------------------------------------
 
