@@ -1,6 +1,6 @@
 """
 Consolida os três resultados da bateria de trajetórias em um relatório único
-(markdown + figuras): a captura on-device (test/benchmark_solvers.cpp), a
+(markdown + figuras): a captura on-device (experiments/benchmark_solvers.cpp), a
 malha fechada (malha_fechada_trajetorias.py) e a comparação contra a
 referência scipy (bench_trajetorias.py --compare).
 

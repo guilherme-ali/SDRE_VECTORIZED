@@ -22,6 +22,10 @@ Uso: python figuras_artigo_final.py [--outdir <dir>]
 
 import argparse
 import csv
+import hashlib
+import json
+import subprocess
+import glob
 import math
 import os
 import re
@@ -137,41 +141,71 @@ def load_boundary():
     return agg
 
 
-def load_flight():
-    txt = open(FLIGHT, encoding="utf-8", errors="replace").read()
-    blocks = txt.split("STATUS DO SISTEMA")
-    proc, stages = [], defaultdict(list)
+def load_flight(paths=None):
+    """Consolida N execucoes do ciclo de voo numa unica populacao de ciclos.
+
+    Ao contrario dos benchmarks de solver, que repetem bit-a-bit, o laco de voo
+    varia entre execucoes: I2C, WiFi e os blocos de impressao deslocam a cauda.
+    Cinco capturas do mesmo binario deram de 0 a 6 ciclos acima do periodo. Uma
+    figura feita de UMA captura reporta, portanto, a amostra que calhou de ser
+    gravada, e nao o comportamento do sistema.
+
+    Somar os histogramas de 50 us e' exato (os bins sao os mesmos em todas as
+    execucoes), entao a ECDF agregada e' a ECDF real do conjunto de ciclos; as
+    amostras de estagio de todas as execucoes entram na mesma lista.
+    """
+    if paths is None:
+        paths = [FLIGHT]
     names = [("LEDs", "LEDs"), ("Bateria", "Battery"), ("WiFi/UDP", "WiFi/UDP"),
              ("Leitura MPU", "IMU read"), ("Filtro Madgwick", "Madgwick"),
              (r"C.lc. .ngulos", "Euler"), ("Matriz Sistema", "SDC matrix"),
              (r"LQR .Ganhos.", "DARE solve"), (r"L.gica Controle", "Control law"),
              (r"C.lc. Omega.", "Mixer"), ("Set Motores", "Motor write")]
-    hist_cdf_p = None
-    hist_cdf_y = None
-    
-    # Check for HIST_PROC_50US in the last block
-    if len(blocks) > 1:
-        last_block = blocks[-1]
-        m_hist = re.search(r"HIST_PROC_50US:([0-9,]+)", last_block)
+    proc, stages = [], defaultdict(list)
+    hist_soma = None
+    meta = {"execucoes": 0, "arquivos": [], "ciclos_por_execucao": [],
+            "estouros_por_execucao": []}
+
+    for path in paths:
+        txt = open(path, encoding="utf-8", errors="replace").read()
+        blocks = txt.split("STATUS DO SISTEMA")
+        if len(blocks) < 2:
+            print("  [!] sem blocos de status, ignorada:", os.path.basename(path))
+            continue
+        m_hist = re.search(r"HIST_PROC_50US:([0-9,]+)", blocks[-1])
         if m_hist:
             counts = [int(x) for x in m_hist.group(1).split(",") if x]
-            tot = sum(counts)
-            if tot > 0:
-                bin_ms = (np.arange(len(counts)) * 50) / 1000.0 # ms
-                cum = np.cumsum(counts)
-                cdf = 100.0 * cum / tot
-                hist_cdf_p = bin_ms
-                hist_cdf_y = cdf
-                
-    for b in blocks[1:]:
-        m = re.search(r"Tempo_Processamento:\s*(\d+)", b)
-        if m:
-            proc.append(int(m.group(1)))
-        for pat, lbl in names:
-            mm = re.search(pat + r":\s*(\d+)\s*.s", b)
-            if mm:
-                stages[lbl].append(int(mm.group(1)))
-    return proc, stages, (hist_cdf_p, hist_cdf_y)
+            if sum(counts) > 0:
+                if hist_soma is None:
+                    hist_soma = list(counts)
+                else:
+                    if len(counts) > len(hist_soma):
+                        hist_soma += [0] * (len(counts) - len(hist_soma))
+                    for i, c in enumerate(counts):
+                        hist_soma[i] += c
+                meta["ciclos_por_execucao"].append(sum(counts))
+                meta["estouros_por_execucao"].append(sum(counts[120:]))  # bin 120 = 6.00 ms
+        for b in blocks[1:]:
+            m = re.search(r"Tempo_Processamento:\s*(\d+)", b)
+            if m:
+                proc.append(int(m.group(1)))
+            for pat, lbl in names:
+                mm = re.search(pat + r":\s*(\d+)\s*.s", b)
+                if mm:
+                    stages[lbl].append(int(mm.group(1)))
+        meta["execucoes"] += 1
+        meta["arquivos"].append(os.path.basename(path))
+        meta.setdefault("caminhos", []).append(path)
+
+    hist_cdf_p = hist_cdf_y = None
+    if hist_soma:
+        tot = sum(hist_soma)
+        hist_cdf_p = (np.arange(len(hist_soma)) * 50) / 1000.0  # ms
+        hist_cdf_y = 100.0 * np.cumsum(hist_soma) / tot
+        meta["ciclos"] = tot
+        meta["estouros"] = sum(hist_soma[120:])
+        meta["hist"] = hist_soma
+    return proc, stages, (hist_cdf_p, hist_cdf_y), meta
 
 
 def load_coverage():
@@ -252,6 +286,64 @@ def pct(v, q):
 # --------------------------------------------------------------------------
 # Fig. 1 — as seis trajetorias
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Procedencia das figuras
+# ---------------------------------------------------------------------------
+_PROV_REGISTRO = {}
+
+
+def _git_rev():
+    try:
+        rev = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                      cwd=REPO, text=True,
+                                      stderr=subprocess.DEVNULL).strip()
+        sujo = subprocess.call(["git", "diff", "--quiet"], cwd=REPO,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) != 0
+        return rev + ("-dirty" if sujo else "")
+    except Exception:
+        return "desconhecido"
+
+
+def _sha12(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "ausente"
+    return h.hexdigest()[:12]
+
+
+def _metadados(nome_pdf, fontes):
+    """Metadados PDF com commit e hash de cada captura de origem.
+
+    O backend PDF do matplotlib aceita Title/Author/Subject/Keywords/Creator;
+    e' o unico lugar que sobrevive ao arquivo sair do repositorio.
+    """
+    fontes = [f for f in fontes if f]
+    itens = ["%s=%s" % (os.path.relpath(f, REPO).replace(os.sep, "/"), _sha12(f))
+             for f in fontes]
+    rev = _git_rev()
+    _PROV_REGISTRO[nome_pdf] = {"commit": rev, "fontes": itens}
+    return {
+        "Title": nome_pdf,
+        "Author": rev,
+        "Subject": "; ".join(itens) if itens else "sem fonte declarada",
+        "Keywords": "python/figuras_artigo_final.py",
+        "Creator": "SDRE_VECTORIZED / figuras_artigo_final.py",
+    }
+
+
+def _grava_registro_proveniencia():
+    destino = os.path.join(OUT, "v8", "figuras_procedencia.json")
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    with open(destino, "w", encoding="utf-8") as f:
+        json.dump(_PROV_REGISTRO, f, indent=2, ensure_ascii=False)
+    print("  procedencia das figuras:", os.path.relpath(destino, REPO))
+
+
 def fig1_envelope(outdir, cover):
     """(a) envelope de operacao percorrido; (b) condicionamento numerico
     resultante. A mensagem e' que (a) varia muito entre trajetorias e (b)
@@ -292,7 +384,7 @@ def fig1_envelope(outdir, cover):
                handletextpad=0.3)
     fig.tight_layout(rect=(0, 0.055, 1, 1))
     p = os.path.join(outdir, "fig1_envelope.pdf")
-    fig.savefig(p, dpi=300)
+    fig.savefig(p, dpi=300, metadata=_metadados("fig1_envelope.pdf", [COBER]))
     plt.close(fig)
     print("  ok", p)
 
@@ -332,7 +424,7 @@ def fig2_timing(outdir, tall):
               frameon=False, fontsize=8)
     fig.tight_layout()
     p = os.path.join(outdir, "fig2_timing.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig2_timing.pdf", [BAT]))
     plt.close(fig)
     print("  ok", p)
 
@@ -414,7 +506,7 @@ def fig3_predictability(outdir, tt, it):
                fontsize=7.5)
     fig.tight_layout()
     p = os.path.join(outdir, "fig3_predictability.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig3_predictability.pdf", [BAT]))
     plt.close(fig)
     print("  ok", p)
 
@@ -482,7 +574,7 @@ def fig4_tolerance(outdir, tq, cover):
                handletextpad=0.4)
     fig.tight_layout(rect=(0, 0.055, 1, 1))
     p = os.path.join(outdir, "fig4_tolerance.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig4_tolerance.pdf", [TOLQR, COBER]))
     plt.close(fig)
     print("  ok", p)
     return floor_lo, floor_hi
@@ -657,7 +749,7 @@ def fig4_tolerance_v8(outdir, ts, cover):
                handletextpad=0.4)
     fig.tight_layout(rect=(0, 0.11, 1, 1))
     p = os.path.join(outdir, "fig4_tolerance_v8.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig4_tolerance_v8.pdf", [TOLSWEEP, COBER]))
     plt.close(fig)
     print("  ok", p)
     if not have_any_bitexact:
@@ -717,7 +809,7 @@ def fig5_safety(outdir, agg):
                handlelength=1.8, handletextpad=0.4)
     fig.tight_layout(rect=(0, 0.06, 1, 1))
     p = os.path.join(outdir, "fig5_safety_envelope.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig5_safety_envelope.pdf", [BOUND]))
     plt.close(fig)
     print("  ok", p)
 
@@ -865,7 +957,7 @@ def fig5_closed_loop(outdir, window=(12.0, 14.5)):
                                  edgecolor="0.25", lw=1.3, ls=(0, (3, 2)), zorder=5))
     fig.tight_layout(rect=(0, 0.02, 1, 1))
     p = os.path.join(outdir, "fig5_closed_loop_v8.pdf")
-    fig.savefig(p)
+    fig.savefig(p, metadata=_metadados("fig5_closed_loop_v8.pdf", [MALHA, SERIE_CSV]))
     plt.close(fig)
     print("  ok", p)
     print("     |dJ/J| maximo T1-T5: doubling %.3f%%, incluindo value iter. %.3f%%"
@@ -876,7 +968,7 @@ def fig5_closed_loop(outdir, window=(12.0, 14.5)):
 # --------------------------------------------------------------------------
 # Fig. 6 — ciclo de voo completo
 # --------------------------------------------------------------------------
-def fig6_flight(outdir, proc, stages, hist_tuple=None):
+def fig6_flight(outdir, proc, stages, hist_tuple=None, meta=None):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.0, 2.24),
                                    gridspec_kw=dict(width_ratios=[1.25, 1.0]))
     if hist_tuple and hist_tuple[0] is not None:
@@ -916,7 +1008,8 @@ def fig6_flight(outdir, proc, stages, hist_tuple=None):
         ax2.text(v + max(v2) * 0.02, y, "%d" % v, va="center", fontsize=7)
     fig.tight_layout()
     pth = os.path.join(outdir, "fig6_flight_cycle.pdf")
-    fig.savefig(pth)
+    fontes = (meta or {}).get("caminhos") or [FLIGHT]
+    fig.savefig(pth, metadata=_metadados("fig6_flight_cycle.pdf", fontes))
     plt.close(fig)
     print("  ok", pth)
 
@@ -931,6 +1024,9 @@ def main():
                     help="pula a fig4_tolerance_v8 (3 paineis, painel (c) novo) e gera só a Fig. 4 do v7")
     ap.add_argument("--no-fig4-v7", action="store_true",
                     help="pula a Fig. 4 do v7 (2 paineis) — só a v8")
+    ap.add_argument("--flight-dir",
+                    help="pasta com voo_run*.txt; a Fig. 6 passa a agregar todas as "
+                         "execucoes em vez de usar apenas outputs/serial_flightloop_E.txt")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -938,7 +1034,13 @@ def main():
     tall, tt, it = load_battery()
     tq = load_tolqr()
     agg = load_boundary()
-    proc, stages, hist_tuple = load_flight()
+    voos = None
+    if args.flight_dir:
+        voos = sorted(glob.glob(os.path.join(args.flight_dir, "voo_run*.txt")),
+                      key=lambda p: int(re.search(r"voo_run(\d+)", p).group(1)))
+        if not voos:
+            raise SystemExit("--flight-dir sem voo_run*.txt: " + args.flight_dir)
+    proc, stages, hist_tuple, flight_meta = load_flight(voos)
     cover = load_coverage()
     ts = load_tolerance_sweep()
     print("gerando figuras em", args.outdir)
@@ -956,7 +1058,8 @@ def main():
         print("piso de quantizacao medido (Fig.4 v8): [%.2e, %.2e]" % (lo8, hi8))
     fig5_closed_loop(args.outdir)
     fig5_safety(args.outdir, agg)
-    fig6_flight(args.outdir, proc, stages, hist_tuple)
+    fig6_flight(args.outdir, proc, stages, hist_tuple, flight_meta)
+    _grava_registro_proveniencia()
 
 
 if __name__ == "__main__":

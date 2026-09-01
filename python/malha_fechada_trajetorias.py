@@ -10,7 +10,7 @@ Resolve a crítica do revisor 2 do CBA 2026 ("a abordagem estatística de
 malha aberta não captura a verdadeira trajetória sequencial contínua de um
 drone em voo... o artigo seria significativamente mais forte se fosse
 incluída uma simulação em malha fechada") — mas com um escopo deliberadamente
-mais estreito que test/benchmark_solvers.cpp: aqui o objetivo não é medir
+mais estreito que experiments/benchmark_solvers.cpp: aqui o objetivo não é medir
 tempo de execução (isso já está coberto pela bateria on-device), e sim se a
 QUANTIZAÇÃO de cada variante _FIXED degrada mensuravelmente o rastreamento
 de trajetória e o custo acumulado, quando comparada ao float64 de

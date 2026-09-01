@@ -135,6 +135,54 @@ def sum_iram_by_object(lines, target_objects):
     return code_bytes, literal_bytes, by_symbol
 
 
+# ---------------------------------------------------------------------------
+# Quadros de pilha (-fstack-usage)
+# ---------------------------------------------------------------------------
+# Caminho aninhado de UM solve em ponto fixo: a rotina de entrada chama o laco
+# de duplicacao, que chama a inversao. O pico de pilha e' a soma dos tres.
+CAMINHO_SDA_FX = (
+    ("entrada SDA-fx", "computeGainMatrixSDA_Fixed"),
+    ("laco de duplicacao", "doubling_loop_q"),
+    ("inversao Gauss-Jordan", "invert_q"),
+)
+
+
+def parse_stack_usage(build_dir):
+    """Le os .su do build e devolve o quadro de cada etapa do caminho SDA-fx.
+
+    Formato de cada linha do .su:  <arquivo>:<lin>:<col>:<assinatura>\t<bytes>\t<tipo>
+
+    O compilador emite mais de uma entrada por funcao quando ha clones/outlining
+    (o mesmo simbolo aparece com 1376 e com 32, por exemplo); vale o MAIOR, que
+    e' o quadro do corpo real.
+    """
+    frames = {}
+    for raiz, _, arquivos in os.walk(build_dir):
+        for nome in arquivos:
+            if not nome.endswith(".su"):
+                continue
+            with open(os.path.join(raiz, nome), encoding="utf-8", errors="replace") as f:
+                for linha in f:
+                    partes = linha.rstrip("\n").split("\t")
+                    if len(partes) < 2:
+                        continue
+                    assinatura = partes[0]
+                    try:
+                        n = int(partes[1])
+                    except ValueError:
+                        continue
+                    for _, chave in CAMINHO_SDA_FX:
+                        if chave in assinatura and n > frames.get(chave, 0):
+                            frames[chave] = n
+    if not frames:
+        return None
+    etapas = [{"etapa": rot, "simbolo": chave, "bytes": frames.get(chave)}
+              for rot, chave in CAMINHO_SDA_FX]
+    total = sum(e["bytes"] for e in etapas if e["bytes"])
+    return {"etapas": etapas, "pico_aninhado_bytes": total,
+            "pico_aninhado_kb": total / 1024.0}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env", default="esp32-s2-saola-1", help="env do PlatformIO cujo build inspecionar")
@@ -201,6 +249,10 @@ def main():
         },
     }
 
+    pilha = parse_stack_usage(os.path.dirname(result["map_file"]))
+    if pilha:
+        result["pilha"] = pilha
+
     print("Arquivo .map: %s" % result["map_file"])
     print()
     print("IRAM Q13.18 (objetos: %s):" % ", ".join(target_objects))
@@ -214,6 +266,17 @@ def main():
           (ram_bytes, ram_bytes / 1024.0, ram_pct, args.ram_total_kb))
     print("Flash (.flash.text + .flash.rodata): %d bytes = %.2f KB (%.1f%% de %.0f KB)" %
           (flash_bytes, flash_bytes / 1024.0, flash_pct, args.flash_partition_kb))
+    print()
+    if pilha:
+        print("Pilha do caminho SDA-fx (-fstack-usage, quadros aninhados de um solve):")
+        for e in pilha["etapas"]:
+            print("  %-24s %6s bytes   (%s)" %
+                  (e["etapa"], e["bytes"] if e["bytes"] is not None else "?", e["simbolo"]))
+        print("  %-24s %6d bytes = %.2f KB" %
+              ("PICO ANINHADO", pilha["pico_aninhado_bytes"], pilha["pico_aninhado_kb"]))
+    else:
+        print("Pilha: nenhum .su encontrado — compile com -fstack-usage no env "
+              "(ja habilitado em [env:esp32-s2-saola-1]) e rode 'pio run -e esp32-s2-saola-1'.")
     print()
     print("AVISO: o numero de Flash acima usa a formula solicitada (.flash.text+.flash.rodata),")
     print("que NAO bate com o \"Flash: ... used\" que 'pio run' imprime no console — aquele inclui")

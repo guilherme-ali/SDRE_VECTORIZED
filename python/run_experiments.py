@@ -470,22 +470,74 @@ def run_flight_experiment(ctx: RunContext, exp: Experiment, port: str) -> None:
         "durante toda a captura."
     )
 
+    repeticoes = max(1, getattr(ctx.args, "repeat", 1))
+    arquivo_voo = OUTPUTS / "voo"
+
     with flight_debug_mode(ctx, port):
         from serial_capture import capture  # type: ignore
 
         window_s = max(exp.est_minutes * 60, 120)
-        ctx.log(f"[voo] capturando por janela fixa de {window_s}s a {exp.baud} baud...")
         if ctx.args.dry_run:
             ctx.status[exp.key] = "dry-run"
             return
 
-        t0 = time.time()
-        result = capture(port, exp.baud, str(outfile), markers=None, timeout_s=window_s,
-                          progress_cb=lambda line: ctx.log(f"  {line}"))
-        elapsed = time.time() - t0
-        ctx.timings[exp.key] = elapsed
-        ctx.status[exp.key] = f"OK ({elapsed:.0f}s, {result.n_bytes} bytes)"
-        ctx.log(f"[voo] captura concluida: {result.n_bytes} bytes em {elapsed:.0f}s.")
+        # Todas as janelas rodam dentro do MESMO par recompilar/regravar: entre
+        # duas janelas a placa ja esta com o firmware de depuracao, e regravar
+        # so' acrescentaria ~4 min por repeticao sem mudar o binario medido.
+        arquivo_voo.mkdir(parents=True, exist_ok=True)
+        # Numeracao continua de onde parou: --repeat N acrescenta N janelas e
+        # NUNCA regrava uma existente. Sobrescrever dado bom por uma captura que
+        # pode falhar (IMU fora do ar) e' a pior troca possivel aqui.
+        existentes = [int(p.stem[len("voo_run"):]) for p in arquivo_voo.glob("voo_run*.txt")
+                      if p.stem[len("voo_run"):].isdigit()]
+        primeiro = max(existentes) + 1 if existentes else 1
+        if existentes:
+            ctx.log(f"[voo] {len(existentes)} janela(s) ja em outputs/voo/; "
+                    f"as novas comecam em voo_run{primeiro}.")
+
+        t_total, validas, descartadas = 0.0, [], []
+        for j in range(repeticoes):
+            i = primeiro + j
+            alvo = arquivo_voo / f"voo_run{i}.txt" if repeticoes > 1 or existentes else outfile
+            ctx.log(f"[voo] janela {j + 1}/{repeticoes} ({alvo.name}): "
+                    f"{window_s}s a {exp.baud} baud...")
+            t0 = time.time()
+            result = capture(port, exp.baud, str(alvo), markers=None, timeout_s=window_s,
+                             progress_cb=lambda line: ctx.log(f"  {line}"))
+            elapsed = time.time() - t0
+            t_total += elapsed
+
+            # Aceitacao: uma janela util tem centenas de blocos de status. Uma
+            # janela com a IMU fora sai com o log da ROM, o carimbo e nada mais.
+            texto = alvo.read_text(encoding="utf-8", errors="replace")
+            n_blocos = texto.count("STATUS DO SISTEMA")
+            if n_blocos < 2:
+                motivo = ("imu_nao_inicializou" if "Falha ao inicializar MPU6050" in texto
+                          else "sem_blocos_de_status")
+                ruim = arquivo_voo / "invalidas"
+                ruim.mkdir(exist_ok=True)
+                destino = ruim / f"voo_run{i}_{motivo}.txt"
+                shutil.move(str(alvo), str(destino))
+                descartadas.append(destino.name)
+                ctx.log(f"[voo] janela {j + 1}/{repeticoes} DESCARTADA ({motivo}): "
+                        f"{result.n_bytes} bytes, {n_blocos} blocos -> {destino.name}")
+                continue
+
+            validas.append(alvo.name)
+            ctx.log(f"[voo] janela {j + 1}/{repeticoes} ok: {result.n_bytes} bytes, "
+                    f"{n_blocos} blocos, {elapsed:.0f}s.")
+            if alvo != outfile:
+                # a ultima janela valida tambem ocupa o caminho canonico, para que
+                # as figuras e o verificador de procedencia achem a captura
+                shutil.copyfile(alvo, outfile)
+
+        ctx.timings[exp.key] = t_total
+        ctx.status[exp.key] = (f"OK ({len(validas)} de {repeticoes} janelas validas, "
+                               f"{t_total:.0f}s)")
+        if descartadas:
+            ctx.log(f"[voo] {len(descartadas)} janela(s) descartada(s): "
+                    f"{', '.join(descartadas)} (ver outputs/voo/invalidas/)")
+        ctx.log("[voo] consolide com 'python python/analisa_voo.py --dir outputs/voo'.")
 
 
 # ---------------------------------------------------------------------------
@@ -558,11 +610,29 @@ def run_figures(ctx: RunContext) -> None:
 
     ctx.log("Gerando figuras do artigo (figuras_artigo_final.py)...")
     try:
-        ctx.run_python(["python/figuras_artigo_final.py"])
+        # --flight-dir: a Fig. 6 agrega as N janelas do ciclo de voo, unico
+        # experimento nao deterministico da campanha
+        cmd = ["python/figuras_artigo_final.py"]
+        if (OUTPUTS / "voo").is_dir():
+            cmd += ["--flight-dir", str(OUTPUTS / "voo")]
+        ctx.run_python(cmd)
         ctx.status["figuras"] = "OK"
     except Exception as e:
         ctx.status["figuras"] = f"FALHOU: {e}"
         ctx.log(f"geracao de figuras falhou: {e}")
+        return
+
+    # As figuras carregam nos metadados o commit e o hash de cada captura de
+    # origem; aqui se confere que o que esta na pasta do artigo saiu do dado que
+    # esta no repositorio. Uma figura velha nao produz erro de compilacao no
+    # LaTeX — sem esta checagem, ela entra no PDF em silencio.
+    ctx.log("Conferindo procedencia das figuras (verifica_figuras.py)...")
+    try:
+        ctx.run_python(["python/verifica_figuras.py"])
+        ctx.status["figuras_procedencia"] = "OK"
+    except Exception as e:
+        ctx.status["figuras_procedencia"] = f"FALHOU: {e}"
+        ctx.log(f"[AVISO] figuras dessincronizadas do dado: {e}")
 
 
 def run_article_pdf(ctx: RunContext) -> None:
@@ -675,6 +745,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--all", action="store_true", help="roda a campanha completa (~10 h)")
     ap.add_argument("--only", nargs="+", metavar="KEY", help="roda so estes experimentos")
     ap.add_argument("--skip", nargs="+", metavar="KEY", default=[], help="pula estes experimentos")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="numero de janelas de captura do experimento voo "
+                         "(unico nao deterministico da campanha). Todas rodam com o "
+                         "mesmo binario, gravadas em outputs/voo/voo_runN.txt")
     ap.add_argument("--force", action="store_true", help="recaptura mesmo se o arquivo ja existir")
     ap.add_argument("--port", default=None, help="porta serial (padrao: autodetecao)")
     ap.add_argument("--analyze-only", action="store_true",

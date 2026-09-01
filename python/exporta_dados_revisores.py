@@ -23,9 +23,11 @@ Uso:
     python python/exporta_dados_revisores.py
 """
 import csv
+import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -40,8 +42,21 @@ SOURCES = {
     "table2_csv": os.path.join(OUT, "v8", "tabela2_v8.csv"),
     "memory_json": os.path.join(OUT, "v8", "memoria_v8.json"),
     "closed_loop": os.path.join(OUT, "malha_fechada_v6_6traj.csv"),
-    "closed_loop_series": os.path.join(OUT, "malha_fechada_serie_T2.csv"),
+    "gain_schedule": os.path.join(OUT, "ganho_congelado_6traj.csv"),
+    "coverage": os.path.join(OUT, "cobertura_full_v5_6traj.csv"),
+    # numeros do artigo que so' passaram a ter script na auditoria v8
+    "reference_residual": os.path.join(OUT, "v8", "residuo_referencia.csv"),
+    "discretisation_fidelity": os.path.join(OUT, "v8", "fidelidade_discretizacao.csv"),
 }
+
+# Series temporais de malha fechada: as seis existem em outputs/ (o script
+# anterior apontava para um "malha_fechada_serie_T2.csv" que nao existe, e a
+# figura do artigo usa T3). Descobertas por glob para nao envelhecer de novo.
+SERIES_GLOB = os.path.join(OUT, "malha_fechada_serie_*.csv")
+
+# Ciclo de voo: N execucoes do mesmo binario. E' o unico experimento nao
+# deterministico da campanha, entao o pacote leva as N, e nao a que calhou.
+VOO_GLOB = os.path.join(OUT, "voo", "voo_run*.txt")
 
 
 def sha256_of(path):
@@ -143,6 +158,80 @@ def export_memory_csv(src_json, dst_csv):
     return len(rows)
 
 
+def export_flight(paths, dst_runs, dst_hist):
+    """Uma linha por execucao + o histograma de 50 us de cada uma, lado a lado.
+
+    O laco de voo nao repete: as mesmas 360 s do mesmo binario deram de 0 a 6
+    ciclos acima do periodo. O revisor precisa das N execucoes para ver isso,
+    nao de uma media que esconde a dispersao.
+    """
+    import re
+    import statistics as stat
+
+    ESTAGIOS = [(r"LQR .Ganhos.", "dare_solve_us"), ("Leitura MPU", "imu_read_us"),
+                ("Matriz Sistema", "sdc_matrix_us"), (r"C.lc. .ngulos", "euler_us")]
+    linhas, hists = [], []
+    for path in paths:
+        txt = open(path, encoding="utf-8", errors="replace").read()
+        blocos = txt.split("STATUS DO SISTEMA")
+        if len(blocos) < 2:
+            continue
+        m = re.search(r"HIST_PROC_50US:([0-9,]+)", blocos[-1])
+        if not m:
+            continue
+        h = [int(x) for x in m.group(1).split(",") if x]
+        tot = sum(h)
+        acc, p50, p99, p999 = 0, None, None, None
+        for i, c in enumerate(h):
+            acc += c
+            f = 100.0 * acc / tot
+            if p50 is None and f >= 50:
+                p50 = i * 50 / 1000.0
+            if p99 is None and f >= 99:
+                p99 = i * 50 / 1000.0
+            if p999 is None and f >= 99.9:
+                p999 = i * 50 / 1000.0
+        mx = re.search(r"Processamento_Maximo:\s*(\d+)", blocos[-1])
+        ml = re.search(r"Tempo_Medio:\s*([\d.]+)", blocos[-1])
+        md = re.search(r"Processamento_Medio:\s*([\d.]+)", blocos[-1])
+        carimbo = re.search(r"STAMP,([^,\s]+),(\d+),(\d+)", txt)
+        row = {
+            "run": os.path.splitext(os.path.basename(path))[0],
+            "cycles": tot,
+            "median_ms": p50, "p99_ms": p99, "p999_ms": p999,
+            "max_ms": int(mx.group(1)) / 1e3 if mx else "",
+            "mean_ms": float(md.group(1)) / 1e3 if md else "",
+            "loop_period_ms": float(ml.group(1)) / 1e3 if ml else "",
+            "cycles_over_period": sum(h[120:]),
+            "git_rev": carimbo.group(1) if carimbo else "",
+            "build_dirty": carimbo.group(2) if carimbo else "",
+        }
+        for pat, lbl in ESTAGIOS:
+            v = [int(mm.group(1)) for b in blocos[1:]
+                 for mm in [re.search(pat + r":\s*(\d+)\s*.s", b)] if mm]
+            row[lbl] = stat.median(v) if v else ""
+        linhas.append(row)
+        hists.append((row["run"], h))
+
+    if not linhas:
+        print("  pulado (nenhuma captura de voo encontrada)")
+        return
+    with open(dst_runs, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(linhas[0]))
+        w.writeheader()
+        w.writerows(linhas)
+    print("  %s: %d execucoes" % (os.path.basename(dst_runs), len(linhas)))
+
+    n = max(len(h) for _, h in hists)
+    with open(dst_hist, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["bin_lower_ms", "bin_upper_ms"] + [r for r, _ in hists] + ["pooled"])
+        for i in range(n):
+            col = [h[i] if i < len(h) else 0 for _, h in hists]
+            w.writerow(["%.2f" % (i * 0.05), "%.2f" % ((i + 1) * 0.05)] + col + [sum(col)])
+    print("  %s: %d bins de 50 us" % (os.path.basename(dst_hist), n))
+
+
 def main():
     os.makedirs(ZENODO, exist_ok=True)
     print("Exportando para %s" % ZENODO)
@@ -163,9 +252,18 @@ def main():
 
     export_memory_csv(SOURCES["memory_json"], os.path.join(ZENODO, "memory_map.csv"))
 
-    # malha fechada: ja sao CSV tabulares na origem, copiados como estao
+    # ciclo de voo: N execucoes do mesmo binario (unico experimento nao deterministico)
+    export_flight(sorted(glob.glob(VOO_GLOB),
+                         key=lambda p: int(re.search(r"voo_run(\d+)", p).group(1))),
+                  os.path.join(ZENODO, "flight_cycle_runs.csv"),
+                  os.path.join(ZENODO, "flight_cycle_histogram.csv"))
+
+    # malha fechada e cobertura: ja sao CSV tabulares na origem, copiados como estao
     for key, name in (("closed_loop", "closed_loop_cost.csv"),
-                      ("closed_loop_series", "closed_loop_series_T2.csv")):
+                      ("gain_schedule", "gain_update_schedule.csv"),
+                      ("coverage", "operating_point_coverage.csv"),
+                      ("reference_residual", "reference_residual.csv"),
+                      ("discretisation_fidelity", "discretisation_fidelity.csv")):
         src = SOURCES[key]
         if os.path.isfile(src):
             with open(src, encoding="utf-8") as fi, \
@@ -174,6 +272,14 @@ def main():
             print("  copiado %s" % name)
         else:
             print("  pulado (nao encontrado): %s" % src)
+
+    # as seis series temporais de malha fechada, descobertas por glob
+    for src in sorted(glob.glob(SERIES_GLOB)):
+        name = "closed_loop_series_" + os.path.basename(src).split("serie_")[1]
+        with open(src, encoding="utf-8") as fi, \
+             open(os.path.join(ZENODO, name), "w", encoding="utf-8") as fo:
+            fo.write(fi.read())
+        print("  copiado %s" % name)
 
     commit = git_commit()
     manifest_path = os.path.join(ZENODO, "MANIFEST.md")
@@ -184,17 +290,18 @@ def main():
         f.write("Hash SHA-256 dos arquivos de origem (capturas seriais brutas em `outputs/`, "
                 "não movidas nem alteradas por este script):\n\n")
         f.write("| Arquivo de origem | SHA-256 |\n|---|---|\n")
-        for key, path in SOURCES.items():
+        fontes = dict(SOURCES)
+        for p in sorted(glob.glob(VOO_GLOB)):
+            fontes["voo_" + os.path.splitext(os.path.basename(p))[0]] = p
+        for key, path in fontes.items():
             if os.path.isfile(path):
                 f.write("| `%s` | `%s` |\n" % (os.path.relpath(path, REPO), sha256_of(path)))
             else:
                 f.write("| `%s` | (nao encontrado nesta maquina) |\n" % os.path.relpath(path, REPO))
         f.write("\nCSVs derivados nesta pasta:\n\n")
-        for name in ("tolerance_sweep_runs.csv", "battery_s2_runs.csv", "battery_s3_runs.csv",
-                     "table2.csv", "memory_map.csv", "closed_loop_cost.csv",
-                     "closed_loop_series_T2.csv"):
+        for name in sorted(os.listdir(ZENODO)):
             p = os.path.join(ZENODO, name)
-            if os.path.isfile(p):
+            if name.endswith(".csv") and os.path.isfile(p):
                 f.write("- `%s` (%d bytes, sha256 `%s`)\n" % (name, os.path.getsize(p), sha256_of(p)))
     print("MANIFEST.md escrito em %s" % manifest_path)
 

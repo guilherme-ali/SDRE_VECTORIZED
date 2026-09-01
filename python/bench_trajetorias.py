@@ -1,8 +1,8 @@
 """
-Espelho em Python da bateria de trajetórias de test/benchmark_solvers.cpp:
+Espelho em Python da bateria de trajetórias de experiments/benchmark_solvers.cpp:
 para cada ponto de operação (phi,theta,p,q,r) das 4 trajetórias de
 python/trajetorias.py, monta Ad,Bd,Qd,Rd (mesma discretização analítica de
-2a ordem do firmware, test/main_backup.cpp:910-1046) e calcula:
+2a ordem do firmware, archive/test_archive/main_backup.cpp:910-1046) e calcula:
 
   1. a referência-ouro em dupla precisão via scipy.linalg.solve_discrete_are
      — resolve a validação circular apontada pelo revisor 2 do CBA 2026
@@ -39,7 +39,7 @@ import fixedpoint_q as fxq
 import trajetorias as trj
 from verifica_solvers import sda_reference, dare_residual
 
-# ===== Parâmetros físicos reais (idênticos a test/main_backup.cpp e ao C++ do benchmark) =====
+# ===== Parâmetros físicos reais (idênticos a archive/test_archive/main_backup.cpp e ao C++ do benchmark) =====
 IXX, IYY, IZZ, IR = 42.95e-6, 37.77e-6, 76.15e-6, 1.02e-7
 L_ARM = 0.060 * 0.70710678
 MOTOR_B, MOTOR_D = 2.98e-8, 0.05 * 2.98e-8
@@ -61,7 +61,7 @@ R_DIAG = np.array([1 / MAX_TAU_ROLL**2, 1 / MAX_TAU_PITCH**2, 1 / MAX_TAU_YAW**2
 def build_Ad_Bd_Qd_Rd(phi, theta, p, q, r, omega_r=0.0):
     """Porta em numpy (denso, sem exploração de esparsidade — não precisa
     de performance no host) da mesma discretização analítica de 2a ordem
-    de test/main_backup.cpp:910-1046 / test/benchmark_solvers.cpp."""
+    de archive/test_archive/main_backup.cpp:910-1046 / experiments/benchmark_solvers.cpp."""
     n = 6
     A = np.zeros((n, n))
     sR, cR = math.sin(phi), math.cos(phi)
@@ -409,7 +409,7 @@ def run_dry(decimacao, saida):
 
 def load_device_csv(path):
     """Lê a captura serial do ESP32 (linhas PT,/RUN,/GAIN,/SUMMARY,) — ver
-    cabecalho de test/benchmark_solvers.cpp para o formato de cada uma."""
+    cabecalho de experiments/benchmark_solvers.cpp para o formato de cada uma."""
     pontos, runs, gains, summaries = [], [], [], []
     with open(path) as f:
         for line in f:
@@ -480,7 +480,7 @@ if __name__ == "__main__":
                      help="passo de amostragem sobre os 46152 pontos no modo dry-run (padrao: 20)")
     ap.add_argument("--saida", default=os.path.join(os.path.dirname(__file__), "..", "outputs", "bench_trajetorias_host.csv"))
     ap.add_argument("--compare", metavar="CSV_DISPOSITIVO",
-                     help="confronta uma captura serial do ESP32 (test/benchmark_solvers.cpp) contra a referencia scipy")
+                     help="confronta uma captura serial do ESP32 (experiments/benchmark_solvers.cpp) contra a referencia scipy")
     args = ap.parse_args()
 
     if args.compare:

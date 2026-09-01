@@ -7,7 +7,7 @@ vale acrescentar mais? Um protótipo em 231 pontos amostrados sugeriu que as
 4 trajetórias produzem condicionamento numérico quase idêntico apesar de
 perfis de atitude muito diferentes — este script refaz essa medição nos
 46152 pontos completos (4 trajetórias x 11538 pontos, mesma discretização
-usada em test/benchmark_solvers.cpp / tolerance_sweep.cpp / gamma_sweep.cpp),
+usada em experiments/benchmark_solvers.cpp / tolerance_sweep.cpp / gamma_sweep.cpp),
 sem decimação, usando scipy.linalg.solve_discrete_are como referência
 float64 (mesma referência-ouro de bench_trajetorias.py).
 

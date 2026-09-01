@@ -5,6 +5,7 @@ Uso: python verifica_numeros_artigo.py
      (Tabela 2 com Value iteration, fracao de passos bit-exatos, piso de quantizacao)
 """
 import argparse
+import glob
 import os
 import re
 import statistics as st
@@ -14,7 +15,10 @@ import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "outputs")
-TEX = r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname\diname2027_v5.tex"
+# Artigo cujas afirmacoes as constantes deste script reproduzem. O .tex nao e' lido:
+# os numeros abaixo sao transcritos do texto de proposito, para que uma mudanca no
+# dado bruto apareca como divergencia em vez de ser absorvida em silencio.
+TEX = r"G:\Meu Drive\ACADEMICO\Mestrado\EVENTOS\DINAME_2027\artigo_diname\diname2027_v8.tex"
 
 _ap = argparse.ArgumentParser()
 _ap.add_argument("--v8", action="store_true", help="tambem confere os numeros novos da v8")
@@ -24,13 +28,31 @@ ok = []
 bad = []
 
 
+def _carrega_tolerance_sweep():
+    """Reaproveita o parser da varredura de tolerancia de figuras_artigo_final,
+    para que figura e auditoria leiam a captura pelo mesmo codigo."""
+    try:
+        import sys
+
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from figuras_artigo_final import load_tolerance_sweep
+
+        return load_tolerance_sweep()
+    except Exception as e:
+        print("[INFO] varredura de tolerancia indisponivel: %r" % (e,))
+        return None
+
+
 def check(label, claimed, measured, tol=0.02):
     """tol relativa; measured==None => nao verificavel automaticamente."""
     if measured is None:
         return
     rel = abs(claimed - measured) / abs(measured) if measured else abs(claimed - measured)
+    # %g em vez de round(x, 6): um passo de 5.44e-07 virava "1e-06" na coluna
+    # de dados, escondendo justamente a ordem de grandeza que se quer conferir.
+    fmt = (lambda v: "%.6g" % v) if isinstance(measured, float) else str
     (ok if rel <= tol else bad).append(
-        "%-52s artigo=%-12s dados=%-12s (dif %.1f%%)" % (label, claimed, round(measured, 6), 100 * rel)
+        "%-52s artigo=%-12s dados=%-12s (dif %.1f%%)" % (label, claimed, fmt(measured), 100 * rel)
     )
 
 
@@ -53,21 +75,26 @@ t2, i2, r2 = load_runs(os.path.join(OUT, "serial_capture_bateria_v5_6traj.txt"))
 t3, i3, _ = load_runs(os.path.join(OUT, "s3", "serial_capture_bateria_s3.txt"))
 
 # ---- Tabela 1 (S2) ----
+# Valores EXATAMENTE como a Tabela 1 do v8 os imprime. Ate 2026-09-01 este
+# dicionario trazia os numeros do v5 (SDA 8.87/8.92 contra os 8.92/8.97 do v8) e
+# passava assim mesmo, porque a tolerancia de 2% engolia a diferenca de 0.6%: a
+# tabela era conferida contra o dado, nunca contra o que o artigo publica.
 TAB1 = {  # metodo: (t50, t999, iters)
-    "SDA": (8.87, 8.92, 9.00), "SDA_SS": (9.37, 9.43, 7.00), "ADDA": (9.58, 9.64, 9.00),
-    "SDA_SCALED": (9.71, 9.77, 9.00), "ASDA": (10.19, 10.25, 9.00), "ITERATIVE": (1.03, 19.28, 8.60),
-    "SDA_FIXED": (3.67, 3.69, 9.00), "SDA_SCALED_FIXED": (3.80, 3.83, 9.00),
-    "SDA_SS_FIXED": (3.91, 3.95, 7.00), "ASDA_FIXED": (4.20, 4.23, 9.00),
-    "ADDA_FIXED": (4.99, 5.03, 9.00), "ITERATIVE_FIXED": (0.95, 14.66, 8.62),
+    "SDA": (8.92, 8.97, 9.00), "SDA_SS": (9.40, 9.46, 7.00), "ADDA": (9.61, 9.68, 9.00),
+    "SDA_SCALED": (9.76, 9.82, 9.00), "ASDA": (10.21, 10.27, 9.00), "ITERATIVE": (1.03, 19.50, 8.60),
+    "SDA_FIXED": (3.68, 3.70, 9.00), "SDA_SCALED_FIXED": (3.81, 3.84, 9.00),
+    "SDA_SS_FIXED": (3.92, 3.96, 7.00), "ASDA_FIXED": (4.21, 4.23, 9.00),
+    "ADDA_FIXED": (5.00, 5.03, 9.00), "ITERATIVE_FIXED": (0.96, 14.71, 8.63),
 }
+TOL_TAB1 = 0.005  # 0.5%: com os valores certos, nao ha mais folga a dar
 for m, (a, b, c) in TAB1.items():
-    check("Tab1 %s t50" % m, a, st.median(t2[m]) / 1e3)
-    check("Tab1 %s t99.9" % m, b, np.percentile(t2[m], 99.9) / 1e3)
-    check("Tab1 %s iters" % m, c, st.mean(i2[m]))
+    check("Tab1 %s t50" % m, a, st.median(t2[m]) / 1e3, tol=TOL_TAB1)
+    check("Tab1 %s t99.9" % m, b, np.percentile(t2[m], 99.9) / 1e3, tol=TOL_TAB1)
+    check("Tab1 %s iters" % m, c, st.mean(i2[m]), tol=TOL_TAB1)
 
 # ---- Tabela 2 (S3) ----
-TAB2 = {"SDA": (1.06, 2.76), "SDA_SS": (1.18, 3.06), "ADDA": (1.04, 3.96),
-        "SDA_SCALED": (1.08, 2.82), "ASDA": (1.10, 3.13)}
+TAB2 = {"SDA": (1.06, 2.77), "SDA_SS": (1.19, 3.08), "ADDA": (1.04, 3.95),
+        "SDA_SCALED": (1.10, 2.81), "ASDA": (1.11, 3.12)}
 for m, (fl, fx) in TAB2.items():
     check("Tab2 %s S3-float" % m, fl, st.median(t3[m]) / 1e3)
     check("Tab2 %s S3-fx" % m, fx, st.median(t3[m + "_FIXED"]) / 1e3)
@@ -78,7 +105,7 @@ sp = [st.median(t2[m]) / st.median(t2[m + "_FIXED"]) for m in DBL]
 check("speedup S2 minimo (1.92)", 1.92, min(sp))
 check("speedup S2 maximo (2.55)", 2.55, max(sp))
 s3r = [st.median(t3[m + "_FIXED"]) / st.median(t3[m]) for m in DBL]
-check("S3 float mais rapido, min (2.6)", 2.6, min(s3r))
+check("S3 float mais rapido, min (2.55)", 2.55, min(s3r))
 check("S3 float mais rapido, max (3.8)", 3.8, max(s3r))
 plat = [st.median(t2[m + "_FIXED"]) / st.median(t3[m + "_FIXED"]) for m in DBL]
 check("S2-fx/S3-fx min (1.26)", 1.26, min(plat))
@@ -86,7 +113,7 @@ check("S2-fx/S3-fx max (1.35)", 1.35, max(plat))
 fl = [st.median(t2[m]) / st.median(t3[m]) for m in DBL]
 check("S3-float/S2-float min (7.9)", 7.9, min(fl))
 check("S3-float/S2-float max (9.3)", 9.3, max(fl))
-check("VI ganho fx (1.09)", 1.09, st.median(t2["ITERATIVE"]) / st.median(t2["ITERATIVE_FIXED"]))
+check("VI ganho fx (1.08)", 1.08, st.median(t2["ITERATIVE"]) / st.median(t2["ITERATIVE_FIXED"]))
 check("VI vs SDA-fx mediana (3.9)", 3.9, st.median(t2["SDA_FIXED"]) / st.median(t2["ITERATIVE_FIXED"]))
 
 # ---- condicionamento ----
@@ -105,37 +132,91 @@ check("piso max 6.1e-5", 6.1e-5, 6 * 2 ** -18 / min(normP))
 check("n de pontos (60000)", 60000, len(cond))
 
 # ---- voo ----
-flight_file = os.path.join(OUT, "serial_flightloop_E.txt")
-if os.path.exists(flight_file):
-    txt = open(flight_file, encoding="utf-8", errors="replace").read()
-    blocks = txt.split("STATUS DO SISTEMA")
-    last = blocks[-1]
-    hist = [int(x) for x in re.search(r"HIST_PROC_50US:([0-9,]+)", last).group(1).split(",") if x]
-    tot = sum(hist)
-    cum = np.cumsum(hist)
-    cdf = 100.0 * cum / tot
+# Fonte: as N janelas de outputs/voo/, nao a captura unica. O laco de voo e' o
+# unico experimento nao deterministico da campanha -- as mesmas 360 s do mesmo
+# binario deram de 0 a 6 ciclos acima do periodo -- entao conferir o artigo
+# contra uma janela so' confere contra a janela que calhou de ser gravada.
+# Somar os histogramas de 50 us e' exato: os bins sao os mesmos em toda janela.
+VOO_ESPERADO = {
+    "execucoes": 10,
+    "ciclos": 475120,
+    "mediana_ms": 4.70,
+    "media_ms": 4.77,
+    "p99_ms": 5.35,
+    "p999_ms": 5.55,
+    "estouros_pct": 0.004,
+    "max_min_ms": 5.79,
+    "max_max_ms": 6.41,
+    "dare_mediana_ms": 3.679,
+    "imu_mediana_ms": 0.624,
+}
+
+voo_dir = os.path.join(OUT, "voo")
+voo_files = sorted(glob.glob(os.path.join(voo_dir, "voo_run*.txt")),
+                   key=lambda p: int(re.search(r"voo_run(\d+)", p).group(1)))
+if not voo_files:
+    single = os.path.join(OUT, "serial_flightloop_E.txt")
+    voo_files = [single] if os.path.exists(single) else []
+
+if voo_files:
+    hist_total, maximos, dare, imu, medias, ciclos_por_run = None, [], [], [], [], []
+    for path in voo_files:
+        txt = open(path, encoding="utf-8", errors="replace").read()
+        blocks = txt.split("STATUS DO SISTEMA")
+        if len(blocks) < 2:
+            continue
+        mh = re.search(r"HIST_PROC_50US:([0-9,]+)", blocks[-1])
+        if not mh:
+            continue
+        h = [int(x) for x in mh.group(1).split(",") if x]
+        if hist_total is None:
+            hist_total = list(h)
+        else:
+            if len(h) > len(hist_total):
+                hist_total += [0] * (len(h) - len(hist_total))
+            for i, c in enumerate(h):
+                hist_total[i] += c
+        ciclos_por_run.append(sum(h))
+        mm = re.search(r"Processamento_Maximo:\s*(\d+)", blocks[-1])
+        if mm:
+            maximos.append(int(mm.group(1)) / 1e3)
+        md = re.search(r"Processamento_Medio:\s*([\d.]+)", blocks[-1])
+        if md:
+            medias.append(float(md.group(1)) / 1e3)
+        for b in blocks[1:]:
+            m1 = re.search(r"LQR .Ganhos.:\s*(\d+)\s*.s", b)
+            if m1:
+                dare.append(int(m1.group(1)) / 1e3)
+            m2 = re.search(r"Leitura MPU:\s*(\d+)\s*.s", b)
+            if m2:
+                imu.append(int(m2.group(1)) / 1e3)
+
+    tot = sum(hist_total)
+    cdf = 100.0 * np.cumsum(hist_total) / tot
     q = lambda p: (np.searchsorted(cdf, p) * 50) / 1000.0
-    check("voo: n de ciclos (47802)", 47802, tot)
-    check("voo: mediana 4.70 ms", 4.70, q(50), tol=0.03)
-    check("voo: p99 5.20 ms", 5.20, q(99), tol=0.03)
-    check("voo: p99.9 5.55 ms", 5.55, q(99.9), tol=0.03)
-    check("voo: estouros 0.025%", 0.025, 100.0 * sum(hist[120:]) / tot, tol=0.05)
-    check("voo: maximo 6.45 ms", 6.45, int(re.search(r"Processamento_Maximo:\s*(\d+)", last).group(1)) / 1e3, tol=0.03)
-    mean_loop = float(re.search(r"Tempo_Medio:\s*([\d.]+)", last).group(1))
-    check("voo: periodo medio 6.0023 ms", 6.0023, mean_loop / 1e3, tol=0.01)
-    prints = [int(m) for m in re.findall(r"Tempo dos Prints:\s*(\d+)", txt)]
-    check("voo: n de blocos de print (290)", 290, len(prints))
-    check("voo: tempo de prints 65.37 s", 65.37, sum(prints) / 1e6, tol=0.01)
-    check("voo: tempo de laco 286.92 s", 286.92, tot * mean_loop / 1e6, tol=0.01)
-    check("voo: init 8.70 s", 8.70, 361 - tot * mean_loop / 1e6 - sum(prints) / 1e6, tol=0.05)
+    media_pond = sum(m * c for m, c in zip(medias, ciclos_por_run)) / tot
+
+    check("voo: n de execucoes", VOO_ESPERADO["execucoes"], len(ciclos_por_run), tol=0.001)
+    check("voo: ciclos agregados", VOO_ESPERADO["ciclos"], tot, tol=0.001)
+    check("voo: mediana (ms)", VOO_ESPERADO["mediana_ms"], q(50), tol=0.01)
+    check("voo: media (ms)", VOO_ESPERADO["media_ms"], media_pond, tol=0.01)
+    check("voo: p99 (ms)", VOO_ESPERADO["p99_ms"], q(99), tol=0.01)
+    check("voo: p99.9 (ms)", VOO_ESPERADO["p999_ms"], q(99.9), tol=0.01)
+    check("voo: estouros (%)", VOO_ESPERADO["estouros_pct"],
+          100.0 * sum(hist_total[120:]) / tot, tol=0.15)
+    check("voo: menor maximo por janela (ms)", VOO_ESPERADO["max_min_ms"], min(maximos), tol=0.01)
+    check("voo: maior maximo por janela (ms)", VOO_ESPERADO["max_max_ms"], max(maximos), tol=0.01)
+    check("voo: DARE mediana (ms)", VOO_ESPERADO["dare_mediana_ms"], st.median(dare), tol=0.01)
+    check("voo: I2C mediana (ms)", VOO_ESPERADO["imu_mediana_ms"], st.median(imu), tol=0.01)
 else:
-    print(f"[INFO] Arquivo de voo {flight_file} ainda nao capturado nesta maquina (pode ser executado com python run_experiments.py --exp voo).")
+    print("[INFO] Nenhuma captura de voo nesta maquina "
+          "(rode: python python/run_experiments.py --only voo --repeat 10).")
 
 # ---- v8: Tabela 2 com Value iteration, fracao bit-exata, e nota de divergencia ----
 if _args.v8:
-    check("Tab2-v8 VI S2-fx/S3-fx (1.69)", 1.69,
+    check("Tab2-v8 VI S2-fx/S3-fx (1.65)", 1.65,
           st.median(t2["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE_FIXED"]))
-    check("Tab2-v8 VI S3-fx/S3-float (1.97)", 1.97,
+    check("Tab2-v8 VI S3-fx/S3-float (1.92)", 1.92,
           st.median(t3["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE"]))
 
     tolsweep_file = os.path.join(OUT, "serial_tolerance_sweep_frobenius.txt")
@@ -208,6 +289,21 @@ if _args.v8:
                       (m, claimed.get(m, float("nan")), delta_pct))
     except FileNotFoundError:
         pass
+
+# ---- numeros do corpo do artigo (fora das tabelas) ----
+# Ate 2026-09-01 estes eram conferidos a mao, quando eram; ver o docstring de
+# python/checagens_prosa.py para o que isso custou nas versoes anteriores.
+try:
+    import checagens_prosa
+
+    checagens_prosa.todas(
+        check,
+        os.path.join(OUT, "serial_capture_bateria_v5_6traj.txt"),
+        _carrega_tolerance_sweep,
+        t2, t3, r2,
+    )
+except Exception as e:  # pragma: no cover
+    print("[AVISO] bloco de checagens de prosa falhou: %r" % (e,))
 
 print("=" * 96)
 print("CONFEREM (%d):" % len(ok))

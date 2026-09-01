@@ -1,17 +1,17 @@
 """
 Trajetórias de atitude usadas na bateria de benchmark dos solvers DARE
-(substitui o passeio aleatório de test/benchmark_solvers.cpp — ver
+(substitui o passeio aleatório de experiments/benchmark_solvers.cpp — ver
 revisoes_consolidadas.md, item 2.2, crítica do R2 do CBA 2026).
 
 Espelho em Python de lib/Trajectories/Trajectories.h (fonte única do lado
-C++, incluída por test/benchmark_solvers.cpp, test/tolerance_sweep.cpp,
+C++, incluída por experiments/benchmark_solvers.cpp, test/tolerance_sweep.cpp,
 test/gamma_sweep.cpp e test/sweep_qr.cpp). Qualquer mudança aqui tem de ser
 feita nos dois lados — a paridade bit-a-bit é premissa do projeto.
 
 Cada trajetória é uma função fechada e determinística t -> (phi, theta, psi)
 [rad]. As velocidades angulares do corpo (p, q, r) são obtidas por um único
 diferenciador central de 3 pontos comum a todas — a MESMA forma implementada
-em C++ em test/benchmark_solvers.cpp (buildTrajectoryPoint), o que garante
+em C++ em experiments/benchmark_solvers.cpp (buildTrajectoryPoint), o que garante
 que host e alvo produzem a sequência de estados bit-a-bit comparável (dentro
 da tolerância de float32). Isso é o que se verifica em
 outputs/traj_ref.csv vs. a captura serial (ver plano, Verificação, item 1).
@@ -64,7 +64,7 @@ def _cinematica_inversa(phi, theta, psi_dot_ignorado, phi_dot, theta_dot, psi_do
 
 def _derivar_central(x, dt):
     """Diferenciador central de 3 pontos, extremidades por diferença de 1a
-    ordem — mesma forma usada em test/benchmark_solvers.cpp."""
+    ordem — mesma forma usada em experiments/benchmark_solvers.cpp."""
     d = np.empty_like(x)
     d[1:-1] = (x[2:] - x[:-2]) / (2.0 * dt)
     d[0] = (x[1] - x[0]) / dt
@@ -80,7 +80,7 @@ def _derivar_regressiva(x, dt):
     memória, sem olhar para o futuro — logo não dá para centrar a
     diferença sem armazenar todo o vetor. Usar a mesma forma regressiva
     aqui mantém Python e C++ bit-a-bit comparáveis também em T4 (ver
-    test/benchmark_solvers.cpp)."""
+    experiments/benchmark_solvers.cpp)."""
     d = np.empty_like(x)
     d[1:] = (x[1:] - x[:-1]) / dt
     d[0] = 0.0
