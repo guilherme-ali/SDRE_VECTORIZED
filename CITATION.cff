@@ -15,7 +15,7 @@ abstract: >-
 type: software
 version: v1.0-diname2027
 date-released: "2026-09-01"
-doi: 10.5281/zenodo.22236293
+doi: 10.5281/zenodo.22238478
 url: "https://github.com/guilherme-ali/SDRE_VECTORIZED"
 repository-code: "https://github.com/guilherme-ali/SDRE_VECTORIZED"
 license: MIT
