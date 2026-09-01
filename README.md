@@ -1,5 +1,9 @@
 # SDRE_VECTORIZED
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22234764.svg)](https://doi.org/10.5281/zenodo.22234764)
+[![Código: MIT](https://img.shields.io/badge/c%C3%B3digo-MIT-blue.svg)](LICENSE)
+[![Dados: CC BY 4.0](https://img.shields.io/badge/dados-CC%20BY%204.0-lightgrey.svg)](LICENSE-DATA)
+
 Controle de atitude de quadricóptero pelo método **SDRE** (*State-Dependent Riccati
 Equation*) em **ponto fixo Q13.18**, para microcontroladores **sem FPU**.
 
@@ -426,6 +430,25 @@ pio run -e <nome> -t upload -t monitor
 - **PlatformIO** (CLI ou extensão do VS Code)
 - **Python 3.10+** com `pip install -r requirements.txt`
 - **MiKTeX** ou outra distribuição LaTeX, apenas para recompilar o PDF do artigo
+
+## Licença
+
+| O que | Licença | Arquivo |
+|---|---|---|
+| Software — `src/`, `experiments/`, `lib/`, `python/`, `scripts/`, `test/` | **MIT** | [`LICENSE`](LICENSE) |
+| Dados de medição — capturas seriais, CSVs derivados e figuras | **CC BY 4.0** | [`LICENSE-DATA`](LICENSE-DATA) |
+
+Dependências de terceiros mantêm cada uma a sua própria licença; nenhuma é
+redistribuída aqui.
+
+## Como citar
+
+O repositório traz um [`CITATION.cff`](CITATION.cff) — no GitHub, use o botão
+*Cite this repository*. Ou cite o depósito diretamente:
+
+> Bassani, G. A. A.; Cardoso, R.; Correa, D. P. F. (2026).
+> *Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
+> Hardware: data and code.* Zenodo. <https://doi.org/10.5281/zenodo.22234764>
 
 ## Publicação
 

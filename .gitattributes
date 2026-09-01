@@ -1,0 +1,6 @@
+# `git archive` (usado pelo pacote Zenodo, em python/exporta_dados_revisores.py)
+# nao deve carregar as saidas de simulacoes antigas: sao 49 MB de xlsx/png/mp4 em
+# archive/python_outputs_antigos/ que nao sustentam numero nenhum do artigo. O
+# codigo arquivado tem de ser o que gerou os dados, nao o historico inteiro.
+archive/ export-ignore
+zenodo_diname2027/ export-ignore

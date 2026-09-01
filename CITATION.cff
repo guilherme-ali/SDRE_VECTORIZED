@@ -1,0 +1,52 @@
+# Metadado de citacao (https://citation-file-format.github.io).
+# O GitHub le este arquivo e mostra o botao "Cite this repository".
+
+cff-version: 1.2.0
+message: "Se voce usar este software ou estes dados, por favor cite o registro Zenodo abaixo."
+title: >-
+  Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
+  Hardware: Rigid-Body Dynamics, Quantisation Limits and Cost Predictability
+  — data and code
+abstract: >-
+  Firmware de controle de atitude de quadricoptero pelo metodo SDRE em ponto
+  fixo Q13.18 para microcontroladores sem FPU (ESP32-S2), e a bancada de medicao
+  de doze solvers de equacao de Riccati (seis algoritmos em duas aritmeticas)
+  sobre 60000 pontos de operacao e 475120 ciclos de controle em hardware.
+type: software
+version: v1.0-diname2027
+date-released: "2026-09-01"
+doi: 10.5281/zenodo.22234764
+url: "https://github.com/guilherme-ali/SDRE_VECTORIZED"
+repository-code: "https://github.com/guilherme-ali/SDRE_VECTORIZED"
+license: MIT
+
+authors:
+  # Convencao do ultimo sobrenome (ABNT NBR 6023 e bases internacionais):
+  # o nome completo e' Guilherme Ali Abdallah Bassani, citado como Bassani, G. A. A.
+  # Forma escolhida pelo autor; manter identica em ORCID, Lattes e publicacoes.
+  - family-names: Bassani
+    given-names: "Guilherme Ali Abdallah"
+    affiliation: >-
+      Center for Engineering, Modeling and Applied Social Sciences,
+      Federal University of ABC (UFABC), Santo Andre, SP, Brazil
+    orcid: "https://orcid.org/0009-0001-7599-0593"
+  - family-names: Cardoso
+    given-names: Reginaldo
+    affiliation: >-
+      Center for Engineering, Modeling and Applied Social Sciences,
+      Federal University of ABC (UFABC), Santo Andre, SP, Brazil
+    orcid: "https://orcid.org/0000-0002-3412-2896"
+  - family-names: Correa
+    given-names: "Diego Paolo Ferruzzo"
+    affiliation: >-
+      Center for Engineering, Modeling and Applied Social Sciences,
+      Federal University of ABC (UFABC), Santo Andre, SP, Brazil
+    orcid: "https://orcid.org/0000-0001-9593-3927"
+
+keywords:
+  - state-dependent Riccati equation
+  - fixed-point arithmetic
+  - quadrotor attitude control
+  - embedded real-time control
+  - structure-preserving doubling algorithm
+  - ESP32

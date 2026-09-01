@@ -57,6 +57,33 @@ def _tex_padrao():
     return os.path.join(d, max(texs, key=lambda p: int(re.search(r"_v(\d+)", p).group(1))))
 
 
+def doi_do_deposito(tex_path):
+    """O .tex ainda carrega um marcador no lugar do DOI do Zenodo?
+
+    O v4 e o v5 traziam `zenodo.XXXXXXX` com um TODO. Em alguma versao seguinte o
+    marcador virou `zenodo.14927231`, um numero com cara de DOI legitimo que nao
+    corresponde a deposito nenhum deste trabalho -- pior que o placeholder, porque
+    passa despercebido numa revisao. Aqui um marcador reprova a auditoria, e um DOI
+    que exista de verdade so' passa se o autor o tiver colado a mao.
+    """
+    if not tex_path or not os.path.isfile(tex_path):
+        return None
+    txt = io.open(tex_path, encoding="utf-8").read()
+    m = re.search(r"zenodo\.([A-Za-z0-9-]+)", txt)
+    if not m:
+        print("  nenhuma mencao a Zenodo no .tex.")
+        return None
+    valor = m.group(1)
+    if not valor.isdigit():
+        print("  DOI do deposito: MARCADOR (`zenodo.%s`)" % valor)
+        print("  -> reserve o DOI no Zenodo (\"Reserve DOI\" no formulario de upload),")
+        print("     cole no .tex e publique. Nao submeta assim.")
+        return False
+    print("  DOI do deposito: zenodo.%s (preenchido)" % valor)
+    print("  -> confira uma vez que este numero e' o do SEU deposito.")
+    return True
+
+
 def cobertura(tex_path):
     """Quantos numeros do corpo do .tex tem alguma checagem, e quais nao tem.
 
@@ -135,10 +162,18 @@ def main():
         resultados[chave] = "OK" if rc == 0 else "REPROVOU (rc=%d)" % rc
         print()
 
+    tex = args.tex or _tex_padrao()
+
+    print("=" * 78)
+    print("[deposito] o .tex ja aponta para um DOI real?")
+    print("=" * 78)
+    doi_ok = doi_do_deposito(tex)
+    print()
+
     print("=" * 78)
     print("[cobertura] quantos numeros do .tex tem checagem")
     print("=" * 78)
-    cob = cobertura(args.tex or _tex_padrao())
+    cob = cobertura(tex)
     print()
 
     print("=" * 78)
@@ -148,7 +183,12 @@ def main():
         print("  %-14s %s" % (chave, resultados.get(chave, "?")))
     if cob:
         print("  %-14s %d de %d numeros do artigo" % ("cobertura", cob[0], cob[1]))
+    if doi_ok is not None:
+        print("  %-14s %s" % ("deposito",
+                              "DOI preenchido" if doi_ok else "DOI AINDA E' MARCADOR"))
     ruins = [k for k, v in resultados.items() if v.startswith("REPROVOU")]
+    if doi_ok is False:
+        ruins.append("deposito (DOI nao preenchido)")
     if ruins:
         print("\n%d etapa(s) reprovada(s): %s" % (len(ruins), ", ".join(ruins)))
         return 1

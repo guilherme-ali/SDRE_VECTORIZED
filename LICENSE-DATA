@@ -1,0 +1,49 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+Copyright (c) 2026 Guilherme Ali Abdallah Bassani, Reginaldo Cardoso,
+                   Diego Paolo Ferruzzo Correa
+
+Os DADOS DE MEDICAO deste trabalho sao licenciados sob CC BY 4.0.
+
+  Resumo legivel: https://creativecommons.org/licenses/by/4.0/deed.pt-br
+  Texto integral: https://creativecommons.org/licenses/by/4.0/legalcode
+
+---------------------------------------------------------------------------
+
+O QUE ESTA COBERTO
+
+  - as capturas seriais brutas do ESP32-S2 e do ESP32-S3 (`outputs/*.txt`,
+    `outputs/s3/`, `outputs/voo/`), incluindo as 10 janelas do ciclo de voo;
+  - os CSVs derivados delas (`outputs/*.csv`, `outputs/v8/`, e a pasta
+    `zenodo_diname2027/`);
+  - as figuras geradas a partir desses dados.
+
+O SOFTWARE que produziu e analisa esses dados esta sob licenca MIT -- ver o
+arquivo LICENSE.
+
+---------------------------------------------------------------------------
+
+VOCE PODE
+
+  - compartilhar: copiar e redistribuir o material em qualquer meio ou formato;
+  - adaptar: remixar, transformar e criar a partir do material, para qualquer
+    fim, inclusive comercial.
+
+DESDE QUE DE O CREDITO
+
+Atribuicao sugerida:
+
+  Bassani, G. A. A.; Cardoso, R.; Correa, D. P. F. (2026).
+  Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
+  Hardware: data and code. Zenodo. https://doi.org/10.5281/zenodo.22234764
+
+Indique se mudancas foram feitas, e nao sugira que os licenciantes endossam
+voce ou o seu uso.
+
+---------------------------------------------------------------------------
+
+SEM GARANTIA
+
+O material e' fornecido "no estado em que se encontra". Os autores nao dao
+garantia de qualquer especie sobre os dados, nem respondem por danos
+decorrentes do seu uso, na extensao permitida pela lei aplicavel.
