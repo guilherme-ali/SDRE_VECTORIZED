@@ -42,6 +42,39 @@ def _linhas(path, prefixo):
 
 
 # ---------------------------------------------------------------------------
+def balanco_das_janelas(check):
+    """Sec. The complete control cycle: as dez janelas de 360 s.
+
+    O v8 dizia "360 s each, 47475 to 47646 cycles per window at a mean period of
+    6.002 ms" -- e 47475 x 6,002 ms = 285 s, nao 360. A diferenca sao os blocos
+    periodicos de status que a captura imprime, e que a estatistica de ciclo
+    exclui. O texto passou a dizer isso; aqui esta a checagem que faltava, para
+    o numero novo nao envelhecer em silencio como os outros.
+    """
+    import glob
+    try:
+        import analisa_voo
+    except ImportError:
+        return
+    caminhos = sorted(glob.glob(os.path.join(OUT, "voo", "voo_run*.txt")))
+    janelas = [j for j in (analisa_voo.analisa(c) for c in caminhos) if j]
+    if len(janelas) < 2:
+        return
+    ciclos = [j["ciclos"] for j in janelas]
+    segundos = [j["ciclos"] * j["periodo"] / 1000.0 for j in janelas]
+    check("prosa: ciclos por janela, minimo (47475)", 47475, min(ciclos), tol=0.001)
+    check("prosa: ciclos por janela, maximo (47646)", 47646, max(ciclos), tol=0.001)
+    check("prosa: periodo medio das janelas (6.002 ms)", 6.002,
+          st.mean(j["periodo"] for j in janelas), tol=0.001)
+    check("prosa: segundos de ciclo por janela (285 s)", 285.0,
+          st.mean(segundos), tol=0.005)
+    check("prosa: ciclos somados nas dez janelas (475120)", 475120, sum(ciclos), tol=0.001)
+    check("prosa: estouros do periodo, total (21)", 21, sum(j["estouros"] for j in janelas))
+    check("prosa: estouros do periodo (0.004%)", 0.004,
+          100.0 * sum(j["estouros"] for j in janelas) / sum(ciclos), tol=0.13)
+
+
+# ---------------------------------------------------------------------------
 def jitter(check):
     """Sec. Cost predictability: 'mean coefficient of variation between 0.023%
     (SDA-SS) and 0.078% (SDA-Scaled-fx) per doubling solver, with no single point
@@ -262,7 +295,7 @@ def gamma(check):
 
 
 def malha_fechada(check):
-    """Sec. Closed-loop: |dJ/J| <= 0.27% em T1-T5 para a familia doubling e 0.44%
+    """Sec. Closed-loop: |dJ/J| <= 0.26% em T1-T5 para a familia doubling e 0.44%
     com a VI-fx; rho maximo 0.9868; recomputar a cada 20 ciclos custa no maximo
     +0.05% e reduz 0.75% (T1) e 2.05% (T3); congelar K custa 22.94% (T1), 3.65%
     (T2), 1.11% (T4) e reduz 1.19% em T3."""
@@ -278,7 +311,7 @@ def malha_fechada(check):
             d = abs(100.0 * (float(r["J_total"]) - ref[tj]) / ref[tj])
             (vi if c == "ITERATIVE_FIXED" else dbl).append(d)
         if dbl:
-            check("prosa: |dJ/J| maximo do doubling em T1-T5 (0.27%)", 0.27, max(dbl), tol=0.05)
+            check("prosa: |dJ/J| maximo do doubling em T1-T5 (0.26%)", 0.26, max(dbl), tol=0.05)
             check("prosa: |dJ/J| maximo com VI-fx em T1-T5 (0.44%)", 0.44, max(vi), tol=0.05)
 
     cob = os.path.join(OUT, "cobertura_full_v5_6traj.csv")
@@ -693,6 +726,7 @@ def norma_absolutos(check):
 
 def todas(check, bat_path, ts_loader, t2=None, t3=None, r2=None):
     jitter(check)
+    balanco_das_janelas(check)
     tabela1_exatidao(check, bat_path)
     if t2 and t3:
         tabela2_completa(check, t2, t3)

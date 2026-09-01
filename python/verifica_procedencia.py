@@ -142,15 +142,38 @@ def main():
         # src/main.cpp via build_src_filter. O que nao se aceita e' commits sem
         # parentesco, que descrevem arvores incomparaveis.
         revs = sorted(commits)
-        linear = True
-        for i in range(len(revs) - 1):
-            a, b = revs[i], revs[i + 1]
-            ok_ab = subprocess.call(["git", "merge-base", "--is-ancestor", a, b],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-            ok_ba = subprocess.call(["git", "merge-base", "--is-ancestor", b, a],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-            if not (ok_ab or ok_ba):
-                linear = False
+        # Sem repositorio git nao da' para responder a pergunta. E' o caso de
+        # quem baixa o code.zip do Zenodo: `git archive` nao leva o `.git`.
+        # Antes de 2026-09-01 todo merge-base falhava nesse cenario e o script
+        # concluia "SEM PARENTESCO", reprovando a auditoria -- transformando a
+        # falta da ferramenta numa afirmacao sobre o dado.
+        # Nao basta perguntar se ha' um repositorio: a pasta pessoal do autor e'
+        # um repositorio git, e `git rev-parse --git-dir` responde 0 de qualquer
+        # lugar sob ela, inclusive de dentro do snapshot do Zenodo. O que decide
+        # e' se o repositorio corrente conhece os commits carimbados.
+        conhece = all(
+            subprocess.call(["git", "cat-file", "-e", r + "^{commit}"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL) == 0
+            for r in revs
+        )
+        if not conhece:
+            print("\n   [INFO] este repositorio nao conhece %s -- provavel execucao"
+                  % ", ".join(revs))
+            print("   a partir do snapshot do Zenodo, que nao carrega o historico git.")
+            print("   O parentesco nao pode ser verificado aqui; confira no repositorio publico:")
+            print("   git merge-base --is-ancestor %s %s" % (revs[0], revs[-1]))
+            linear = None
+        else:
+            linear = True
+            for i in range(len(revs) - 1):
+                a, b = revs[i], revs[i + 1]
+                ok_ab = subprocess.call(["git", "merge-base", "--is-ancestor", a, b],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+                ok_ba = subprocess.call(["git", "merge-base", "--is-ancestor", b, a],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+                if not (ok_ab or ok_ba):
+                    linear = False
         if linear:
             print("\n   os commits estao na mesma linha de historia; diferenca entre eles:")
             try:
@@ -161,7 +184,7 @@ def main():
             except Exception:
                 pass
             print("   -> revise se essa diferenca poderia afetar os binarios das demais capturas.")
-        else:
+        elif linear is False:
             problemas.append("capturas de commits SEM PARENTESCO: %s" % ", ".join(revs))
     elif commits:
         rev = next(iter(commits))

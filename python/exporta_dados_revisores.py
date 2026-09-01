@@ -41,7 +41,7 @@ ZENODO = os.path.join(REPO, "zenodo_diname2027")
 # DOI reservado no Zenodo para este deposito. E' a mesma string que aparece na
 # secao "Data and Code Availability" do artigo; python/auditoria.py confere que
 # o .tex nao voltou a carregar um marcador no lugar dela.
-DOI = "10.5281/zenodo.22236293"
+DOI = "10.5281/zenodo.22238478"
 # DOI conceito: resolve sempre para a versao mais recente do deposito. A v1
 # (zenodo.22236199) foi criada pela integracao automatica GitHub->Zenodo e
 # trazia so' o zip do repositorio, sem as capturas brutas -- ver README do
@@ -288,9 +288,11 @@ def arquiva_codigo(commit):
     GitHub continua sendo o lugar de trabalhar, mas o que gerou ESTES numeros
     fica congelado aqui.
     """
-    os.makedirs(CODE, exist_ok=True)
     curto = commit[:7] if commit and commit != "desconhecido" else "sem-commit"
-    destino = os.path.join(CODE, "SDRE_VECTORIZED-%s.zip" % curto)
+    # direto na raiz do deposito, e nao dentro de CODE/: o git archive JA' e' um
+    # zip, e deixa-lo numa pasta fazia empacota_para_upload() zipar de novo. O
+    # code.zip da v2 tem, por isso, um zip dentro dele.
+    destino = os.path.join(ZENODO, "code.zip")
     try:
         # exclui archive/ (49 MB de xlsx/png de simulacoes antigas, que nao
         # sustentam numero nenhum do artigo) e o proprio pacote, para nao
@@ -302,9 +304,9 @@ def arquiva_codigo(commit):
     except Exception as e:
         print("  code/: git archive falhou (%r); snapshot NAO gerado." % (e,))
         return None
-    print("  code/: %s (%.1f MB)" % (os.path.basename(destino),
-                                     os.path.getsize(destino) / 1e6))
-    return os.path.relpath(destino, ZENODO).replace(os.sep, "/")
+    print("  code.zip: snapshot em %s (%.1f MB)"
+          % (curto, os.path.getsize(destino) / 1e6))
+    return "code.zip"
 
 
 def escreve_readme(commit, codigo):
@@ -334,7 +336,7 @@ def escreve_readme(commit, codigo):
     A("|---|---|")
     A("| `raw/` | As capturas seriais **como saíram da placa**. Sao a medida em si. |")
     A("| `derived/` | CSVs tabulares calculados de `raw/`, prontos para abrir em qualquer ferramenta. |")
-    A("| `code/` | Snapshot do repositorio no commit acima: firmware de voo, os 8 firmwares de experimento, os 12 solvers e os scripts de analise. |")
+    A("| `code.zip` | Snapshot do repositorio no commit acima: firmware de voo, os 8 firmwares de experimento, os 12 solvers e os scripts de analise. |")
     A("| `MANIFEST.md` | SHA-256 de cada arquivo, para conferir integridade. |")
     A("")
     A("## As capturas brutas (`raw/`)")
@@ -347,16 +349,17 @@ def escreve_readme(commit, codigo):
     A("")
     A("| Arquivo | Experimento |")
     A("|---|---|")
-    A("| `serial_capture_bateria_v5_6traj.txt` | bateria principal: 12 solvers x 60000 pontos (Tabela 1) |")
+    A("| `serial_capture_bateria_v5_6traj.txt` | bateria principal: 12 solvers x 60000 pontos (Tabela 1, **Figuras 1 e 2**) |")
     A("| `s3/serial_capture_bateria_s3.txt` | a mesma bateria no ESP32-S3, que tem FPU (Tabela 2) |")
-    A("| `serial_tolerance_sweep_frobenius.txt` | varredura de tolerancia, 1e-2 a 1e-6 (Figura 4) |")
+    A("| `serial_tolerance_sweep_frobenius.txt` | varredura de tolerancia, 1e-2 a 1e-6 (**Figura 3**) |")
     A("| `serial_tol_qr_sweep_A.txt` | tolerancia cruzada com os pesos Q/R (1,4 M chamadas) |")
     A("| `serial_sweep_qr_v4.txt` | mapa grosso de seguranca Q/R, com pico de magnitude interna |")
-    A("| `serial_boundary_fine_B.txt` | fronteira fina de quebra do ponto fixo (Figura 5) |")
+    A("| `serial_boundary_fine_B.txt` | fronteira fina de quebra do ponto fixo (**Figura 4**) |")
     A("| `serial_repeatability_D.txt` | 20 repeticoes no mesmo dado: jitter de execucao |")
     A("| `serial_gamma_sweep.txt` | escolha do deslocamento gamma do SDA-SS |")
     A("| `serial_norm_benchmark.txt` | custo do teste de convergencia, ciclo a ciclo |")
-    A("| `voo/voo_run1..10.txt` | 10 janelas de 360 s do ciclo de voo completo |")
+    A("| `voo/voo_run1..10.txt` | 10 janelas de 360 s do ciclo de voo completo (**Figura 6**) |")
+    A("| `serial_flightloop_E.txt` | copia de `voo/voo_run10.txt` sob o nome legado que alguns scripts ainda esperam |")
     A("")
     A("As dez janelas de voo sao do mesmo binario. E' o unico experimento nao")
     A("deterministico do conjunto: a mediana do ciclo repete (4,70 ms nas dez), a cauda")
@@ -377,17 +380,47 @@ def escreve_readme(commit, codigo):
     A("| `reference_residual.csv` | residuo da referencia float64 (scipy) nos mesmos pontos |")
     A("| `discretisation_fidelity.csv` | fidelidade do modelo discreto por trajetoria |")
     A("| `table2.csv`, `memory_map.csv` | Tabela 2 e metricas de memoria do firmware |")
+    A("| `memoria_v8.json` | as mesmas metricas de memoria na forma que a auditoria le |")
     A("")
     A("## Refazer tudo")
     A("")
-    A("Com o codigo de `code/` e as capturas de `raw/` em `outputs/`, sem hardware:")
+    A("Sem hardware, a partir so' deste pacote. Descompacte `code.zip` e trabalhe")
+    A("dentro do snapshot.")
+    A("")
+    A("**Passo 1 — as capturas brutas.** De `raw.zip` para `outputs/` do snapshot,")
+    A("mantendo os nomes: `raw/*.txt` em `outputs/`, `raw/s3/` em `outputs/s3/` e")
+    A("`raw/voo/` em `outputs/voo/`.")
+    A("")
+    A("**Passo 2 — os derivados.** Os CSVs de `derived/` foram renomeados para ingles")
+    A("na publicacao, e os scripts procuram os nomes originais. Renomeie os da tabela")
+    A("(o conteudo e' identico, so' o nome muda):")
+    A("")
+    A("| Em `derived/` | Nome que o codigo espera |")
+    A("|---|---|")
+    A("| `operating_point_coverage.csv` | `outputs/cobertura_full_v5_6traj.csv` |")
+    A("| `closed_loop_cost.csv` | `outputs/malha_fechada_v6_6traj.csv` |")
+    A("| `closed_loop_series_T*.csv` | `outputs/malha_fechada_serie_T*.csv` |")
+    A("| `gain_update_schedule.csv` | `outputs/ganho_congelado_6traj.csv` |")
+    A("| `reference_residual.csv` | `outputs/v8/residuo_referencia.csv` |")
+    A("| `discretisation_fidelity.csv` | `outputs/v8/fidelidade_discretizacao.csv` |")
+    A("| `table2.csv` | `outputs/v8/tabela2_v8.csv` |")
+    A("| `memoria_v8.json` | `outputs/v8/memoria_v8.json` |")
+    A("")
+    A("**Passo 3 — rodar.**")
     A("")
     A("```bash")
     A("pip install -r requirements.txt")
-    A("python python/auditoria.py            # confere procedencia, numeros e figuras")
+    A("python python/auditoria.py                  # procedencia, numeros e figuras")
     A("python python/numeros_artigo.py --tabelas   # recalcula as Tabelas 1 e 2")
-    A("python python/figuras_artigo_final.py --flight-dir outputs/voo")
+    A("python python/figuras_artigo_final.py --outdir figuras --flight-dir outputs/voo")
     A("```")
+    A("")
+    A("O `--outdir` e' obrigatorio: sem ele o script escreve na pasta do artigo dos")
+    A("autores. A etapa `figuras` da auditoria compara com o `.tex`, que nao vem no")
+    A("pacote, entao ela e' a unica que nao roda de fora; as demais rodam.")
+    A("")
+    A("Conferido em 2026-09-01: com estes passos as seis figuras do artigo saem")
+    A("**identicas** as publicadas, pixel a pixel.")
     A("")
     A("Para refazer as medidas do zero, com as placas: `python python/run_experiments.py --all`")
     A("(~10 h). Detalhes em `experiments/README.md` dentro do snapshot.")
@@ -396,7 +429,7 @@ def escreve_readme(commit, codigo):
     A("")
     A("| O que | Licenca |")
     A("|---|---|")
-    A("| Software (tudo em `code/`) | MIT — ver `LICENSE` dentro do snapshot |")
+    A("| Software (tudo em `code.zip`) | MIT — ver `LICENSE` dentro do snapshot |")
     A("| Dados de medicao (`raw/` e `derived/`) | CC BY 4.0 — ver `LICENSE-DATA` |")
     A("")
     A("Atribuicao sugerida:")
@@ -422,7 +455,7 @@ def empacota_para_upload():
     deposito sem que ninguem precise baixar nada.
     """
     saidas = []
-    for pasta in (RAW, DERIVED, CODE):
+    for pasta in (RAW, DERIVED):
         if not os.path.isdir(pasta):
             continue
         base = os.path.join(ZENODO, os.path.basename(pasta))
@@ -435,70 +468,11 @@ def empacota_para_upload():
     return saidas
 
 
-def main():
-    import argparse
+def escreve_manifesto(commit):
+    """SHA-256 das origens e de cada arquivo que sobe para o deposito.
 
-    ap = argparse.ArgumentParser(description="Monta o pacote de dados do Zenodo.")
-    ap.add_argument("--sem-zip", action="store_true",
-                    help="deixa raw/, derived/ e code/ como pastas, sem compactar "
-                         "(util para inspecionar antes de subir)")
-    args = ap.parse_args()
-
-    os.makedirs(ZENODO, exist_ok=True)
-    os.makedirs(DERIVED, exist_ok=True)
-    print("Exportando para %s" % ZENODO)
-
-    export_tolerance_sweep(SOURCES["tolerance_sweep"],
-                            os.path.join(DERIVED, "tolerance_sweep_runs.csv"))
-    export_battery(SOURCES["battery_s2"], os.path.join(DERIVED, "battery_s2_runs.csv"))
-    export_battery(SOURCES["battery_s3"], os.path.join(DERIVED, "battery_s3_runs.csv"))
-
-    table2_dst = os.path.join(DERIVED, "table2.csv")
-    if os.path.isfile(SOURCES["table2_csv"]):
-        with open(SOURCES["table2_csv"], encoding="utf-8") as fi, \
-             open(table2_dst, "w", encoding="utf-8") as fo:
-            fo.write(fi.read())
-        print("  copiado table2.csv")
-    else:
-        print("  pulado (rodar python/generate_table2.py antes): %s" % SOURCES["table2_csv"])
-
-    export_memory_csv(SOURCES["memory_json"], os.path.join(DERIVED, "memory_map.csv"))
-
-    # ciclo de voo: N execucoes do mesmo binario (unico experimento nao deterministico)
-    export_flight(sorted(glob.glob(VOO_GLOB),
-                         key=lambda p: int(re.search(r"voo_run(\d+)", p).group(1))),
-                  os.path.join(DERIVED, "flight_cycle_runs.csv"),
-                  os.path.join(DERIVED, "flight_cycle_histogram.csv"))
-
-    # malha fechada e cobertura: ja sao CSV tabulares na origem, copiados como estao
-    for key, name in (("closed_loop", "closed_loop_cost.csv"),
-                      ("gain_schedule", "gain_update_schedule.csv"),
-                      ("coverage", "operating_point_coverage.csv"),
-                      ("reference_residual", "reference_residual.csv"),
-                      ("discretisation_fidelity", "discretisation_fidelity.csv")):
-        src = SOURCES[key]
-        if os.path.isfile(src):
-            with open(src, encoding="utf-8") as fi, \
-                 open(os.path.join(DERIVED, name), "w", encoding="utf-8") as fo:
-                fo.write(fi.read())
-            print("  copiado %s" % name)
-        else:
-            print("  pulado (nao encontrado): %s" % src)
-
-    # as seis series temporais de malha fechada, descobertas por glob
-    for src in sorted(glob.glob(SERIES_GLOB)):
-        name = "closed_loop_series_" + os.path.basename(src).split("serie_")[1]
-        with open(src, encoding="utf-8") as fi, \
-             open(os.path.join(DERIVED, name), "w", encoding="utf-8") as fo:
-            fo.write(fi.read())
-        print("  copiado %s" % name)
-
-    # o que o artigo promete no deposito, e que ate 2026-09-01 nao estava la:
-    brutas = copia_capturas_brutas()
-    commit = git_commit()
-    codigo = arquiva_codigo(commit)
-    escreve_readme(commit, codigo)
-
+    Chamada DEPOIS de empacota_para_upload(): so' assim ela ve os zips finais.
+    """
     manifest_path = os.path.join(ZENODO, "MANIFEST.md")
     with open(manifest_path, "w", encoding="utf-8") as f:
         f.write("# Manifesto do pacote de dados — DINAME 2027 (v8)\n\n")
@@ -516,7 +490,7 @@ def main():
                 f.write("| `%s` | `%s` |\n" % (os.path.relpath(path, REPO), sha256_of(path)))
             else:
                 f.write("| `%s` | (nao encontrado nesta maquina) |\n" % os.path.relpath(path, REPO))
-        f.write("\nCSVs derivados nesta pasta:\n\n")
+        f.write("\nArquivos deste deposito (confira com `sha256sum`):\n\n")
         for raiz, _, arquivos in os.walk(ZENODO):
             for name in sorted(arquivos):
                 if name in ("MANIFEST.md", "README.md"):
@@ -524,11 +498,114 @@ def main():
                 p = os.path.join(raiz, name)
                 rel = os.path.relpath(p, ZENODO).replace(os.sep, "/")
                 f.write("- `%s` (%d bytes, sha256 `%s`)\n" % (rel, os.path.getsize(p), sha256_of(p)))
-    print("MANIFEST.md escrito em %s" % manifest_path)
+    return manifest_path
 
+
+def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Monta o pacote de dados do Zenodo.")
+    ap.add_argument("--sem-zip", action="store_true",
+                    help="deixa raw/, derived/ e code/ como pastas, sem compactar "
+                         "(util para inspecionar antes de subir)")
+    ap.add_argument("--doi", default=None,
+                    help="DOI desta versao (ex.: 10.5281/zenodo.22238478). Cada "
+                         "versao nova no Zenodo ganha o seu; reserve-o no rascunho "
+                         "(New version -> o DOI ja' aparece) e passe aqui, em vez "
+                         "de editar a constante a mao.")
+    ap.add_argument("--doi-conceito", default=None,
+                    help="DOI conceito, que resolve sempre para a versao mais "
+                         "recente. So' muda se o deposito for recriado do zero.")
+    args = ap.parse_args()
+
+    global DOI, DOI_CONCEITO
+    if args.doi:
+        DOI = args.doi.strip().replace("https://doi.org/", "")
+    if args.doi_conceito:
+        DOI_CONCEITO = args.doi_conceito.strip().replace("https://doi.org/", "")
+    if not re.fullmatch(r"10\.5281/zenodo\.\d+", DOI):
+        raise SystemExit("DOI com formato inesperado: %r" % DOI)
+    print("DOI desta versao: %s  |  conceito: %s" % (DOI, DOI_CONCEITO))
+
+    os.makedirs(ZENODO, exist_ok=True)
+    # Nada de uma execucao anterior sobrevive: uma rodada --sem-zip deixa raw/,
+    # derived/ e code/ soltos, e a rodada seguinte herdava esse estado. Foi por
+    # aí que o MANIFEST da v2 acabou carimbando os zips da geracao anterior.
+    for pasta in (RAW, DERIVED, CODE):
+        if os.path.isdir(pasta):
+            print("  limpando sobra de execucao anterior: %s/"
+                  % os.path.basename(pasta))
+            shutil.rmtree(pasta)
+    os.makedirs(DERIVED, exist_ok=True)
+    print("Exportando para %s" % ZENODO)
+
+    export_tolerance_sweep(SOURCES["tolerance_sweep"],
+                            os.path.join(DERIVED, "tolerance_sweep_runs.csv"))
+    export_battery(SOURCES["battery_s2"], os.path.join(DERIVED, "battery_s2_runs.csv"))
+    export_battery(SOURCES["battery_s3"], os.path.join(DERIVED, "battery_s3_runs.csv"))
+
+    table2_dst = os.path.join(DERIVED, "table2.csv")
+    if os.path.isfile(SOURCES["table2_csv"]):
+        shutil.copyfile(SOURCES["table2_csv"], table2_dst)
+        print("  copiado table2.csv")
+    else:
+        print("  pulado (rodar python/generate_table2.py antes): %s" % SOURCES["table2_csv"])
+
+    export_memory_csv(SOURCES["memory_json"], os.path.join(DERIVED, "memory_map.csv"))
+    # o JSON tambem, e nao so' o CSV achatado: a etapa de memoria da auditoria le
+    # o JSON, e sem ele quem baixa o pacote nao consegue rodar essa checagem.
+    if os.path.isfile(SOURCES["memory_json"]):
+        shutil.copyfile(SOURCES["memory_json"],
+                        os.path.join(DERIVED, "memoria_v8.json"))
+        print("  copiado memoria_v8.json")
+
+    # ciclo de voo: N execucoes do mesmo binario (unico experimento nao deterministico)
+    export_flight(sorted(glob.glob(VOO_GLOB),
+                         key=lambda p: int(re.search(r"voo_run(\d+)", p).group(1))),
+                  os.path.join(DERIVED, "flight_cycle_runs.csv"),
+                  os.path.join(DERIVED, "flight_cycle_histogram.csv"))
+
+    # malha fechada e cobertura: ja sao CSV tabulares na origem, copiados como estao
+    for key, name in (("closed_loop", "closed_loop_cost.csv"),
+                      ("gain_schedule", "gain_update_schedule.csv"),
+                      ("coverage", "operating_point_coverage.csv"),
+                      ("reference_residual", "reference_residual.csv"),
+                      ("discretisation_fidelity", "discretisation_fidelity.csv")):
+        src = SOURCES[key]
+        if os.path.isfile(src):
+            # copyfile e' binario de proposito: a copia em modo texto convertia
+            # a quebra de linha no Windows e o SHA-256 do arquivo publicado
+            # deixava de bater com o da origem que o proprio MANIFEST lista.
+            shutil.copyfile(src, os.path.join(DERIVED, name))
+            print("  copiado %s" % name)
+        else:
+            print("  pulado (nao encontrado): %s" % src)
+
+    # as seis series temporais de malha fechada, descobertas por glob
+    for src in sorted(glob.glob(SERIES_GLOB)):
+        name = "closed_loop_series_" + os.path.basename(src).split("serie_")[1]
+        shutil.copyfile(src, os.path.join(DERIVED, name))
+        print("  copiado %s" % name)
+
+    # o que o artigo promete no deposito, e que ate 2026-09-01 nao estava la:
+    brutas = copia_capturas_brutas()
+    commit = git_commit()
+    codigo = arquiva_codigo(commit)
+    escreve_readme(commit, codigo)
+
+    # A compactacao vem ANTES do manifesto, de proposito. Ate 2026-09-01 era o
+    # contrario, e o manifesto carimbava os zips da geracao anterior: o
+    # MANIFEST.md publicado na v2 lista SHA-256 que nao correspondem a nenhum
+    # dos tres zips publicados (e um tamanho errado para o code.zip). Os zips
+    # estavam integros; errado estava o documento que serve para provar isso.
     if not args.sem_zip:
         print(chr(10) + "Compactando para upload no Zenodo:")
         empacota_para_upload()
+
+    manifest_path = escreve_manifesto(commit)
+    print("MANIFEST.md escrito em %s" % manifest_path)
+
+    if not args.sem_zip:
         print(chr(10) + "Suba estes itens no deposito %s:" % DOI)
         for n in ("README.md", "MANIFEST.md", "raw.zip", "derived.zip", "code.zip"):
             p = os.path.join(ZENODO, n)
