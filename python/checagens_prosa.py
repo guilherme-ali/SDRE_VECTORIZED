@@ -74,6 +74,43 @@ def balanco_das_janelas(check):
           100.0 * sum(j["estouros"] for j in janelas) / sum(ciclos), tol=0.13)
 
 
+def _significativos(texto):
+    """Quantos algarismos significativos o artigo imprime em `texto`.
+
+    "2.9e-13" -> 2 ; "4.70" -> 3 ; "0.26" -> 2 ; "1051" -> 4 ; "0.004" -> 1.
+    Zeros a esquerda nao contam; a direita da virgula, contam.
+    """
+    corpo = texto.strip().lstrip("+-").split("e")[0].split("E")[0]
+    inteiro, _, frac = corpo.partition(".")
+    digitos = (inteiro + frac).lstrip("0")
+    return len(digitos) or 1
+
+
+def arredonda_como(texto, medido):
+    """`medido` arredondado para os significativos com que `texto` e' impresso."""
+    if medido == 0:
+        return 0.0
+    expoente = int(math.floor(math.log10(abs(medido))))
+    casas = -(expoente - _significativos(texto) + 1)
+    return round(medido, casas)
+
+
+def check_impresso(check, label, texto, medido):
+    """Confere um numero IMPRESSO: o medido tem de arredondar para ele.
+
+    Diferente de check(): nao ha tolerancia relativa. Se o artigo imprime
+    "2.9e-13" e o dado e' 2.94843e-13, passa (arredonda para 2.9e-13); se o
+    artigo imprime "3.0e-13", reprova. Use check() apenas onde a afirmacao e'
+    de fato aproximada ("about", "a factor of eight", "under 1%").
+    """
+    if medido is None:
+        return
+    alvo = float(texto)
+    obtido = arredonda_como(texto, float(medido))
+    # tolerancia so' para o ruido do proprio round() em binario
+    check(label, alvo, obtido if obtido else alvo, tol=1e-9)
+
+
 # ---------------------------------------------------------------------------
 def jitter(check):
     """Sec. Cost predictability: 'mean coefficient of variation between 0.023%
@@ -108,9 +145,12 @@ def referencia_float64(check):
               % os.path.relpath(path, REPO))
         return
     r = [float(x["dare_residual_rel"]) for x in csv.DictReader(open(path, encoding="utf-8"))]
-    check("prosa: residuo da referencia, minimo (4.8e-15)", 4.8e-15, min(r), tol=0.06)
-    check("prosa: residuo da referencia, mediana (6.3e-14)", 6.3e-14, float(np.median(r)), tol=0.06)
-    check("prosa: residuo da referencia, maximo (3.0e-13)", 3.0e-13, max(r), tol=0.06)
+    check_impresso(check, "prosa: residuo da referencia, minimo (4.8e-15)",
+                   "4.8e-15", min(r))
+    check_impresso(check, "prosa: residuo da referencia, mediana (6.3e-14)",
+                   "6.3e-14", float(np.median(r)))
+    check_impresso(check, "prosa: residuo da referencia, maximo (2.9e-13)",
+                   "2.9e-13", max(r))
     check("prosa: pontos da referencia (60000)", 60000, len(r))
 
 
@@ -465,7 +505,7 @@ def tabela2_completa(check, t2, t3):
         "SDA": (8.92, 3.68, 1.33, 2.61),
         "SDA_SS": (9.40, 3.92, 1.27, 2.60),
         "ADDA": (9.61, 5.00, 1.27, 3.81),
-        "SDA_SCALED": (9.76, 3.81, 1.36, 2.55),
+        "SDA_SCALED": (9.76, 3.82, 1.36, 2.55),
         "ASDA": (10.21, 4.21, 1.35, 2.81),
         "ITERATIVE": (1.03, 0.96, 1.65, 1.92),
     }
