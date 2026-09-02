@@ -568,7 +568,8 @@ def tabela2_completa(check, t2, t3):
 def deslocamento_e_rastreamento(check):
     """Sec. Cost predictability: as iteracoes medianas da VI crescem com a
     distancia media entre estados consecutivos -- 2.6e-3 (T5), 0.21 (T4),
-    2.26 (T3), 18.7 (T6). E Sec. Closed-loop: em T3, perto de 1.9 Hz, o
+    2.26 (T3), 18.7 (T6); a passo 20, T4 sai de 0.21 para 2.97.
+    E Sec. Closed-loop: em T3, perto de 1.9 Hz, o
     realizado atrasa 5.2 graus sobre 27.7 de amplitude, e as duas aritmeticas
     diferem 0.12 grau."""
     cob = os.path.join(OUT, "cobertura_full_v5_6traj.csv")
@@ -586,6 +587,16 @@ def deslocamento_e_rastreamento(check):
             d = [math.dist(v[i], v[i - 1]) for i in range(1, len(v))]
             check("prosa: ||dx|| medio em %s (%g)" % (traj.split("_")[0], alvo),
                   alvo, st.mean(d), tol=0.06)
+
+        # Sec. Closed-loop: decimar a atualizacao de K por 20 nao divide o
+        # trabalho por 20 na familia anytime -- o solver acorda com o estado
+        # 20 passos adiante. Em T4 o deslocamento medio sai de 0.21 para
+        # 2.97, acima do 2.26 de T3, onde a contagem medida ja e 13, nao 1.
+        v = por_traj.get("T4_degrau_yaw")
+        if v and len(v) > 20:
+            d20 = [math.dist(v[i], v[i - 20]) for i in range(20, len(v))]
+            check("prosa: ||dx|| em T4 a cada 20 ciclos (2.97)", 2.97,
+                  st.mean(d20), tol=0.02)
 
     serie = os.path.join(OUT, "malha_fechada_serie_T3_chirp.csv")
     if not os.path.isfile(serie):
