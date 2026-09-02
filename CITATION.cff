@@ -4,17 +4,16 @@
 cff-version: 1.2.0
 message: "Se voce usar este software ou estes dados, por favor cite o registro Zenodo abaixo."
 title: >-
-  Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
-  Hardware: Rigid-Body Dynamics, Quantisation Limits and Cost Predictability
-  — data and code
+  Comparative Analysis of Numerical Methods for Solving the Discrete Algebraic
+  Riccati Equation in Resource-Constrained Embedded Systems — data and code
 abstract: >-
   Firmware de controle de atitude de quadricoptero pelo metodo SDRE em ponto
   fixo Q13.18 para microcontroladores sem FPU (ESP32-S2), e a bancada de medicao
   de doze solvers de equacao de Riccati (seis algoritmos em duas aritmeticas)
-  sobre 60000 pontos de operacao e 475120 ciclos de controle em hardware.
+  sobre 60000 pontos de operacao e 475444 ciclos de controle em hardware.
 type: software
-version: v1.0-diname2027
-date-released: "2026-09-01"
+version: v2.0-diname2027
+date-released: "2026-09-02"
 doi: 10.5281/zenodo.22256810
 url: "https://github.com/guilherme-ali/SDRE_VECTORIZED"
 repository-code: "https://github.com/guilherme-ali/SDRE_VECTORIZED"

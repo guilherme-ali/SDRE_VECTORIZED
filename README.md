@@ -95,13 +95,13 @@ ciclo-limite de ±1 LSB e falha toda tolerância abaixo do piso (fracasso falso)
 lê a IMU (MPU6050 por I²C)  →  0,62 ms
 filtro Madgwick (atitude)   →  0,07 ms
 monta A(x) da fatoração SDC →  0,001 ms
-resolve a DARE em Q13.18    →  3,68 ms   ← o custo dominante
+resolve a DARE em Q13.18    →  3,16 ms   ← o custo dominante
 lei de controle u = -Kx     →  0,002 ms
 mistura X-quad → 4 motores  →  0,07 ms
 ```
 
-Mediana de 4,70 ms por ciclo, com folga de 1,3 ms sobre o período. Medido em 10
-janelas de 360 s: **21 de 475120 ciclos (0,004%)** passaram do período.
+Mediana de 4,20 ms por ciclo, com folga de 1,8 ms sobre o período. Medido em 10
+janelas de 360 s: **2 de 475444 ciclos (0,0004%)** passaram do período.
 
 ### Hardware
 
@@ -293,11 +293,11 @@ python python/auditoria.py
 ```
 
 ```
-procedencia    OK      de qual commit, chip e clock veio cada captura
-numeros        OK      243 checagens contra o dado bruto, 0 divergencias
-figuras        OK      as figuras do artigo saíram do dado de hoje
-voo            OK      10 janelas, 475120 ciclos
-cobertura      194 de 219 numeros do corpo do artigo
+procedencia    REPROVOU  8 capturas com arvore suja (ver PROVENANCE.md)
+numeros        OK        253 checagens contra o dado bruto, 0 divergencias
+figuras        OK        as figuras do artigo saíram do dado de hoje
+voo            OK        10 janelas, 475444 ciclos
+cobertura      190 de 216 numeros do corpo do artigo
 ```
 
 A linha de **cobertura** é a que evita auto-engano: ela conta quantos números do
@@ -447,11 +447,11 @@ O repositório traz um [`CITATION.cff`](CITATION.cff) — no GitHub, use o botã
 *Cite this repository*. Ou cite o depósito diretamente:
 
 > Bassani, G. A. A.; Cardoso, R.; Correa, D. P. F. (2026).
-> *Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less
-> Hardware: data and code.* Zenodo. <https://doi.org/10.5281/zenodo.22256810>
+> *Comparative Analysis of Numerical Methods for Solving the Discrete Algebraic
+> Riccati Equation in Resource-Constrained Embedded Systems: data and code.* Zenodo. <https://doi.org/10.5281/zenodo.22256810>
 
 ## Publicação
 
 Os dados sustentam o artigo aceito no **DINAME 2027** (ABCM):
-*Quadrotor Attitude Control by State-Dependent Riccati Equation on FPU-less Hardware:
-Rigid-Body Dynamics, Quantisation Limits and Cost Predictability.*
+*Comparative Analysis of Numerical Methods for Solving the Discrete Algebraic
+Riccati Equation in Resource-Constrained Embedded Systems.*
