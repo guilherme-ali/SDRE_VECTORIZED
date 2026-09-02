@@ -215,6 +215,16 @@ def main():
         print("\n[S3 ainda nao capturado/incompleto - Tabela 2 pendente]")
 
     if args.tabelas:
+        # Arredondamento decimal: "%.2f" % 0.955 da' "0.95" porque 0.955 em
+        # binario e' 0.95499..., enquanto toda convencao decimal da' 0.96.
+        # Mesmo erro que ja' tinha produzido 3.81 no lugar de 3.82 para o
+        # SDA-Scaled-fx, cuja mediana e' exatamente 3815 us.
+        from decimal import Decimal, ROUND_HALF_UP
+
+        def dec(x, casas=2):
+            q = Decimal(1).scaleb(-casas)
+            return float(Decimal(repr(float(x))).quantize(q, ROUND_HALF_UP))
+
         print("\n" + "=" * 94)
         print("LaTeX - Tabela 1")
         print("=" * 94)
@@ -222,7 +232,8 @@ def main():
             if m not in t2:
                 continue
             print("%-20s & %5.2f  & %5.2f  & %.2f & %.1e & %.1e & %d/%d \\\\" %
-                  (LBL1[m], st.median(t2[m]) / 1e3, np.percentile(t2[m], 99.9) / 1e3,
+                  (LBL1[m], dec(st.median(t2[m]) / 1e3),
+                   dec(np.percentile(t2[m], 99.9) / 1e3),
                    st.mean(i2[m]), st.median(r2[m]), st.median(eK[m]),
                    c2.get(m, 0), n2.get(m, 0)))
         if have_s3:
@@ -232,10 +243,10 @@ def main():
                 if m not in t3:
                     continue
                 print("%-16s & %5.2f & %4.2f & %4.2f & %4.2f & %4.2f & %4.2f \\\\" %
-                      (LBL[m], st.median(t2[m]) / 1e3, st.median(t2[fx]) / 1e3,
-                       st.median(t3[m]) / 1e3, st.median(t3[fx]) / 1e3,
-                       st.median(t2[fx]) / st.median(t3[fx]),
-                       st.median(t3[fx]) / st.median(t3[m])))
+                      (LBL[m], dec(st.median(t2[m]) / 1e3), dec(st.median(t2[fx]) / 1e3),
+                       dec(st.median(t3[m]) / 1e3), dec(st.median(t3[fx]) / 1e3),
+                       dec(st.median(t2[fx]) / st.median(t3[fx])),
+                       dec(st.median(t3[fx]) / st.median(t3[m]))))
 
 
 if __name__ == "__main__":

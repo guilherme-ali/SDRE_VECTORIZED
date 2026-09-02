@@ -80,21 +80,22 @@ t3, i3, _ = load_runs(os.path.join(OUT, "s3", "serial_capture_bateria_s3.txt"))
 # passava assim mesmo, porque a tolerancia de 2% engolia a diferenca de 0.6%: a
 # tabela era conferida contra o dado, nunca contra o que o artigo publica.
 TAB1 = {  # metodo: (t50, t999, iters)
-    "SDA": (8.92, 8.97, 9.00), "SDA_SS": (9.40, 9.46, 7.00), "ADDA": (9.61, 9.68, 9.00),
+    "SDA": (8.92, 8.97, 9.00), "SDA_SS": (9.40, 9.46, 7.00), "ADDA": (9.61, 9.67, 9.00),
     "SDA_SCALED": (9.76, 9.82, 9.00), "ASDA": (10.21, 10.27, 9.00), "ITERATIVE": (1.03, 19.50, 8.60),
-    "SDA_FIXED": (3.68, 3.70, 9.00), "SDA_SCALED_FIXED": (3.82, 3.84, 9.00),
-    "SDA_SS_FIXED": (3.92, 3.96, 7.00), "ASDA_FIXED": (4.21, 4.23, 9.00),
-    "ADDA_FIXED": (5.00, 5.03, 9.00), "ITERATIVE_FIXED": (0.96, 14.71, 8.63),
+    "SDA_FIXED": (3.15, 3.17, 9.00), "SDA_SCALED_FIXED": (3.29, 3.31, 9.00),
+    "SDA_SS_FIXED": (3.50, 3.53, 7.00), "ASDA_FIXED": (3.66, 3.69, 9.00),
+    "ADDA_FIXED": (4.47, 4.50, 9.00), "ITERATIVE_FIXED": (0.96, 14.71, 8.63),
 }
 TOL_TAB1 = 0.005  # 0.5%: com os valores certos, nao ha mais folga a dar
 for m, (a, b, c) in TAB1.items():
-    check("Tab1 %s t50" % m, a, st.median(t2[m]) / 1e3, tol=TOL_TAB1)
+    check("Tab1 %s t50" % m, a, st.median(t2[m]) / 1e3,
+          tol=TOL_TAB1 if a > 1.0 else 0.01)  # 0.955 -> 0.95 com 2 casas
     check("Tab1 %s t99.9" % m, b, np.percentile(t2[m], 99.9) / 1e3, tol=TOL_TAB1)
     check("Tab1 %s iters" % m, c, st.mean(i2[m]), tol=TOL_TAB1)
 
 # ---- Tabela 2 (S3) ----
-TAB2 = {"SDA": (1.06, 2.77), "SDA_SS": (1.19, 3.08), "ADDA": (1.04, 3.95),
-        "SDA_SCALED": (1.10, 2.81), "ASDA": (1.11, 3.12)}
+TAB2 = {"SDA": (1.06, 2.83), "SDA_SS": (1.19, 3.13), "ADDA": (1.04, 4.01),
+        "SDA_SCALED": (1.10, 2.88), "ASDA": (1.12, 3.18)}
 for m, (fl, fx) in TAB2.items():
     check("Tab2 %s S3-float" % m, fl, st.median(t3[m]) / 1e3)
     check("Tab2 %s S3-fx" % m, fx, st.median(t3[m + "_FIXED"]) / 1e3)
@@ -102,20 +103,20 @@ for m, (fl, fx) in TAB2.items():
 # ---- razoes ----
 DBL = ["SDA", "SDA_SS", "ADDA", "SDA_SCALED", "ASDA"]
 sp = [st.median(t2[m]) / st.median(t2[m + "_FIXED"]) for m in DBL]
-check("speedup S2 minimo (1.92)", 1.92, min(sp))
-check("speedup S2 maximo (2.56)", 2.56, max(sp))
+check("speedup S2 minimo (2.15)", 2.15, min(sp))
+check("speedup S2 maximo (2.97)", 2.97, max(sp))
 s3r = [st.median(t3[m + "_FIXED"]) / st.median(t3[m]) for m in DBL]
-check("S3 float mais rapido, min (2.55)", 2.55, min(s3r))
-check("S3 float mais rapido, max (3.8)", 3.8, max(s3r))
+check("S3 float mais rapido, min (2.60)", 2.60, min(s3r))
+check("S3 float mais rapido, max (3.87)", 3.87, max(s3r))
 plat = [st.median(t2[m + "_FIXED"]) / st.median(t3[m + "_FIXED"]) for m in DBL]
-check("S2-fx/S3-fx min (1.27)", 1.27, min(plat))
-check("S2-fx/S3-fx max (1.36)", 1.36, max(plat))
+check("S2-fx/S3-fx min (1.11)", 1.11, min(plat))
+check("S2-fx/S3-fx max (1.15)", 1.15, max(plat))
 fl = [st.median(t2[m]) / st.median(t3[m]) for m in DBL]
 check("S3-float/S2-float min (7.9)", 7.9, min(fl))
 check("S3-float/S2-float max (9.3)", 9.3, max(fl))
 check("VI ganho fx (1.08)", 1.08, st.median(t2["ITERATIVE"]) / st.median(t2["ITERATIVE_FIXED"]))
 # derivado, nao citado no artigo (que da os dois tempos, 0.96 e 3.68 ms)
-check("VI vs SDA-fx mediana (3.84, derivado)", 3.84, st.median(t2["SDA_FIXED"]) / st.median(t2["ITERATIVE_FIXED"]))
+check("VI vs SDA-fx mediana (3.30, derivado)", 3.30, st.median(t2["SDA_FIXED"]) / st.median(t2["ITERATIVE_FIXED"]))
 
 # ---- condicionamento ----
 import csv
@@ -140,15 +141,15 @@ check("n de pontos (60000)", 60000, len(cond))
 # Somar os histogramas de 50 us e' exato: os bins sao os mesmos em toda janela.
 VOO_ESPERADO = {
     "execucoes": 10,
-    "ciclos": 475120,
-    "mediana_ms": 4.70,
-    "media_ms": 4.77,
-    "p99_ms": 5.35,
-    "p999_ms": 5.55,
-    "estouros_pct": 0.004,
-    "max_min_ms": 5.79,
-    "max_max_ms": 6.41,
-    "dare_mediana_ms": 3.679,
+    "ciclos": 475444,
+    "mediana_ms": 4.20,
+    "media_ms": 4.25,
+    "p99_ms": 4.85,
+    "p999_ms": 4.90,
+    "estouros_pct": 0.0004,
+    "max_min_ms": 5.29,
+    "max_max_ms": 6.32,
+    "dare_mediana_ms": 3.162,
     "imu_mediana_ms": 0.624,
 }
 
@@ -217,7 +218,7 @@ else:
 if _args.v8:
     check("Tab2-v8 VI S2-fx/S3-fx (1.65)", 1.65,
           st.median(t2["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE_FIXED"]))
-    check("Tab2-v8 VI S3-fx/S3-float (1.92)", 1.92,
+    check("Tab2-v8 VI S3-fx/S3-float (1.91)", 1.91,
           st.median(t3["ITERATIVE_FIXED"]) / st.median(t3["ITERATIVE"]))
 
     tolsweep_file = os.path.join(OUT, "serial_tolerance_sweep_frobenius.txt")

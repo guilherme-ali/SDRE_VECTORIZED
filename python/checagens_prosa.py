@@ -62,15 +62,15 @@ def balanco_das_janelas(check):
         return
     ciclos = [j["ciclos"] for j in janelas]
     segundos = [j["ciclos"] * j["periodo"] / 1000.0 for j in janelas]
-    check("prosa: ciclos por janela, minimo (47475)", 47475, min(ciclos), tol=0.001)
-    check("prosa: ciclos por janela, maximo (47646)", 47646, max(ciclos), tol=0.001)
+    check("prosa: ciclos por janela, minimo (47474)", 47474, min(ciclos), tol=0.001)
+    check("prosa: ciclos por janela, maximo (47645)", 47645, max(ciclos), tol=0.001)
     check("prosa: periodo medio das janelas (6.002 ms)", 6.002,
           st.mean(j["periodo"] for j in janelas), tol=0.001)
     check("prosa: segundos de ciclo por janela (285 s)", 285.0,
           st.mean(segundos), tol=0.005)
-    check("prosa: ciclos somados nas dez janelas (475120)", 475120, sum(ciclos), tol=0.001)
-    check("prosa: estouros do periodo, total (21)", 21, sum(j["estouros"] for j in janelas))
-    check("prosa: estouros do periodo (0.004%)", 0.004,
+    check("prosa: ciclos somados nas dez janelas (475444)", 475444, sum(ciclos), tol=0.001)
+    check("prosa: estouros do periodo, total (2)", 2, sum(j["estouros"] for j in janelas))
+    check("prosa: estouros do periodo (0.0004%)", 0.0004,
           100.0 * sum(j["estouros"] for j in janelas) / sum(ciclos), tol=0.13)
 
 
@@ -114,8 +114,8 @@ def check_impresso(check, label, texto, medido):
 # ---------------------------------------------------------------------------
 def jitter(check):
     """Sec. Cost predictability: 'mean coefficient of variation between 0.023%
-    (SDA-SS) and 0.078% (SDA-Scaled-fx) per doubling solver, with no single point
-    exceeding 0.14%'. Fonte: serial_repeatability_D.txt, coluna cv_pct."""
+    (SDA-SS) and 0.085% (SDA-SS-fx) per doubling solver, with no single point
+    exceeding 0.15%'. Fonte: serial_repeatability_D.txt, coluna cv_pct."""
     cv = defaultdict(list)
     for p in _linhas(os.path.join(OUT, "serial_repeatability_D.txt"), "SUMMARY,"):
         if len(p) < 11 or p[1] == "traj":
@@ -129,8 +129,9 @@ def jitter(check):
         return
     medios = {m: st.mean(v) for m, v in dbl.items()}
     check("prosa: CV medio minimo (0.023%, SDA-SS)", 0.023, min(medios.values()))
-    check("prosa: CV medio maximo (0.078%, SDA-Scaled-fx)", 0.078, max(medios.values()))
-    check("prosa: nenhum ponto acima de 0.14%", 0.14, max(max(v) for v in dbl.values()))
+    check("prosa: CV medio maximo (0.085%, SDA-SS-fx)", 0.085, max(medios.values()))
+    check("prosa: nenhum ponto acima de 0.15%", 0.15,
+          max(max(v) for v in dbl.values()), tol=0.10)  # limite, nao igualdade
     check("prosa: pontos por solver na repetibilidade (2004)", 2004,
           st.median([len(v) for v in dbl.values()]))
 
@@ -177,7 +178,7 @@ def fidelidade_discretizacao(check):
 
 
 def predictability(check, bat_path):
-    """Sec. Cost predictability: SDA-fx entre 3.67 e 3.69 ms e nunca 62% do periodo;
+    """Sec. Cost predictability: SDA-fx entre 3.14 e 3.16 ms e nunca 53% do periodo;
     VI-fx de 0.94 ms (T2) a 12.79 ms (T6), chamadas ate 41.8 ms (60.8 ms em float),
     estourando o periodo em 43.9% do chirp e 100% de T6; medianas de iteracao da VI
     1, 1, 13, 32. Fonte: a bateria principal."""
@@ -193,9 +194,9 @@ def predictability(check, bat_path):
     sda = tempo["SDA_FIXED"]
     med = [st.median(v) for v in sda.values()]
     todos = [x for v in sda.values() for x in v]
-    check("prosa: SDA-fx mediana minima por traj (3.67 ms)", 3.67, min(med))
-    check("prosa: SDA-fx mediana maxima por traj (3.69 ms)", 3.69, max(med))
-    check("prosa: SDA-fx nunca atinge 62% do periodo", 62.0, 100.0 * max(todos) / 6.0, tol=0.01)
+    check("prosa: SDA-fx mediana minima por traj (3.14 ms)", 3.14, min(med))
+    check("prosa: SDA-fx mediana maxima por traj (3.16 ms)", 3.16, max(med))
+    check("prosa: SDA-fx nunca atinge 53% do periodo", 53.0, 100.0 * max(todos) / 6.0, tol=0.01)
 
     vi, vif = tempo["ITERATIVE_FIXED"], tempo["ITERATIVE"]
     check("prosa: VI-fx mediana em T2 (0.94 ms)", 0.94, st.median(vi["T2_figura8"]))
@@ -252,19 +253,19 @@ def teste_de_convergencia(check):
     adda = num(r"ADDA-fx iter pura:\s*([\d.]+) us")
     vi = num(r"VI-fx iter pura:\s*([\d.]+) us")
 
-    check("prosa: custo do teste (214.8 us)", 214.8, atual)
-    check("prosa: custo do teste em ciclos (51551)", 51551, ciclos)
-    check("prosa: 72 conversoes int->float (129.8 us)", 129.8, div)
+    check("prosa: custo do teste (215.1 us)", 215.1, atual)
+    check("derivado: custo do teste em ciclos (51630)", 51630, ciclos)
+    check("derivado: 72 conversoes int->float (130.0 us)", 130.0, div)
     check("prosa: ciclos por divisao em software (433)", 433, cyc_div)
     check("prosa: raiz quadrada (2.4 us)", 2.4, raiz)
     check("prosa: aritmetica pura SDA-fx (276.2 us)", 276.2, sda)
     check("prosa: aritmetica pura ADDA-fx (421.4 us)", 421.4, adda)
     check("prosa: aritmetica pura VI-fx (151.4 us)", 151.4, vi)
     if atual and sda:
-        check("prosa: teste = 43.7% da iteracao do SDA-fx", 43.7, 100 * atual / (atual + sda))
-        check("prosa: teste = 33.8% da iteracao do ADDA-fx", 33.8, 100 * atual / (atual + adda))
-        check("prosa: teste = 58.7% da iteracao da VI-fx", 58.7, 100 * atual / (atual + vi))
-        check("prosa: reciproco pre-computado (69.9 us, 3.1x)", 3.1, atual / otim)
+        check("derivado: teste em float = 43.8% da iteracao do SDA-fx", 43.8, 100 * atual / (atual + sda))
+        check("derivado: teste em float = 33.8% da iteracao do ADDA-fx", 33.8, 100 * atual / (atual + adda))
+        check("derivado: teste em float = 58.7% da iteracao da VI-fx", 58.7, 100 * atual / (atual + vi))
+        check("derivado: reciproco pre-computado (70.2 us, 3.1x)", 3.1, atual / otim)
         check("prosa: teste inteiro (5.5 us, 39x)", 39.0, atual / inteira)
 
 
@@ -384,7 +385,7 @@ def malha_fechada(check):
 
 
 def memoria(check):
-    """Sec. Implementation: 2390 bytes (2.33 KB) de IRAM no kernel Q13.18;
+    """Sec. Implementation: 2723 bytes (2.66 KB) de IRAM no kernel Q13.18;
     101.8 KB de 320 KB de RAM (31.8%). Fonte: outputs/v8/memoria_v8.json
     (gerar com python/parse_memory_map.py apos compilar o firmware de voo)."""
     path = os.path.join(OUT, "v8", "memoria_v8.json")
@@ -393,16 +394,16 @@ def memoria(check):
               % os.path.relpath(path, REPO))
         return
     j = json.load(open(path, encoding="utf-8"))
-    check("prosa: IRAM do kernel Q13.18 (2390 bytes)", 2390, j["iram_q13_18"]["code_bytes"], tol=0.01)
-    check("prosa: IRAM do kernel Q13.18 (2.33 KB)", 2.33, j["iram_q13_18"]["code_kb"], tol=0.01)
+    check("prosa: IRAM do kernel Q13.18 (2723 bytes)", 2723, j["iram_q13_18"]["code_bytes"], tol=0.01)
+    check("prosa: IRAM do kernel Q13.18 (2.66 KB)", 2.66, j["iram_q13_18"]["code_kb"], tol=0.01)
     check("prosa: RAM do firmware de voo (101.8 KB)", 101.8, j["ram"]["used_kb"], tol=0.01)
     check("prosa: RAM do firmware de voo (31.8%)", 31.8, j["ram"]["pct"], tol=0.01)
 
 
 def tolerancia(check, ts_loader):
     """Sec. Tolerance: apertar tau de 1e-2 a 1e-6 muda o residuo em +6.6% (SDA-fx),
-    +5.2% (SDA-Scaled-fx) e -0.2% (ASDA-fx), no maximo 6.8%; custa +19.3% (SDA-fx),
-    entre +9.9% e +29.0% na familia. Passo medido: 5.8e-4 em tau=1e-3, 3.0e-5 em
+    +5.2% (SDA-Scaled-fx) e -0.2% (ASDA-fx), no maximo 6.8%; custa +18.9% (SDA-fx),
+    entre +9.7% e +27.0% na familia. Passo medido: 5.8e-4 em tau=1e-3, 3.0e-5 em
     1e-4, zero em 1824/1824 a partir de 1e-5; ADDA-fx 1823/1824; ASDA-fx 63/1824
     em 1e-6 com passo 5.4e-7. Residuo e' MEDIANA (painel a), tempo e' MEDIA
     (painel b) -- as duas estatisticas que a figura mostra."""
@@ -425,9 +426,9 @@ def tolerancia(check, ts_loader):
     check("prosa: residuo de SDA-Scaled-fx (+5.2%)", 5.2, dres["SDA_SCALED_FIXED"], tol=0.03)
     check("prosa: residuo de ASDA-fx (-0.2%)", -0.2, dres["ASDA_FIXED"], tol=0.25)
     check("prosa: maior mudanca de residuo na familia (6.8%)", 6.8, max(dres.values()), tol=0.03)
-    check("prosa: tempo de SDA-fx ao apertar tau (+19.3%)", 19.3, dt["SDA_FIXED"], tol=0.02)
-    check("prosa: menor acrescimo de tempo (+9.9%)", 9.9, min(dt.values()), tol=0.02)
-    check("prosa: maior acrescimo de tempo (+29.0%)", 29.0, max(dt.values()), tol=0.02)
+    check("prosa: tempo de SDA-fx ao apertar tau (+18.9%)", 18.9, dt["SDA_FIXED"], tol=0.02)
+    check("prosa: menor acrescimo de tempo (+9.7%)", 9.7, min(dt.values()), tol=0.02)
+    check("prosa: maior acrescimo de tempo (+27.0%)", 27.0, max(dt.values()), tol=0.02)
 
     sda = ts[("0a", "SDA_FIXED")]
     check("prosa: passo de SDA-fx em tau=1e-3 (5.8e-4)", 5.8e-4,
@@ -502,12 +503,12 @@ def tabela2_completa(check, t2, t3):
     """Tab. 2: as colunas S2 e as duas razoes. As colunas S3 ja eram conferidas
     em verifica_numeros_artigo; aqui fecham-se as quatro restantes."""
     LINHAS = {  # metodo: (S2-float, S2-fx, S2fx/S3fx, S3fx/S3float)
-        "SDA": (8.92, 3.68, 1.33, 2.61),
-        "SDA_SS": (9.40, 3.92, 1.27, 2.60),
-        "ADDA": (9.61, 5.00, 1.27, 3.81),
-        "SDA_SCALED": (9.76, 3.82, 1.36, 2.55),
-        "ASDA": (10.21, 4.21, 1.35, 2.81),
-        "ITERATIVE": (1.03, 0.96, 1.65, 1.92),
+        "SDA": (8.92, 3.15, 1.11, 2.67),
+        "SDA_SS": (9.40, 3.50, 1.12, 2.63),
+        "ADDA": (9.61, 4.47, 1.11, 3.87),
+        "SDA_SCALED": (9.76, 3.29, 1.14, 2.60),
+        "ASDA": (10.21, 3.66, 1.15, 2.85),
+        "ITERATIVE": (1.03, 0.96, 1.65, 1.91),
     }
     # a linha da value iteration nao entra no TAB2 de verifica_numeros_artigo
     # (que so' cobre a familia doubling); suas duas colunas S3 sao conferidas aqui
@@ -635,7 +636,7 @@ def derivados_da_tabela1(check, t2, r2):
     0.53 ms a mais; tau=1e-3 fica 16x acima do pior piso; ||P||_F fica perto
     de 0.43."""
     if t2.get("SDA_FIXED") and t2.get("ASDA_FIXED"):
-        check("prosa: custo extra do ASDA-fx (0.53 ms)", 0.53,
+        check("prosa: custo extra do ASDA-fx (0.51 ms)", 0.51,
               (st.median(t2["ASDA_FIXED"]) - st.median(t2["SDA_FIXED"])) / 1e3, tol=0.05)
     try:
         import numeros_artigo
@@ -657,8 +658,8 @@ def derivados_da_tabela1(check, t2, r2):
 
 
 def pilha(check):
-    """Sec. Implementation: 1376 bytes na entrada do SDA-fx, 1424 no laco de
-    duplicacao, 1264 na inversao, 4064 (3.97 KB) no pico aninhado. Fonte:
+    """Sec. Implementation: 1376 bytes na entrada do SDA-fx, 1456 no laco de
+    duplicacao, 1264 na inversao, 4096 (4.00 KB) no pico aninhado. Fonte:
     outputs/v8/memoria_v8.json, secao 'pilha' (gerar com parse_memory_map.py
     apos 'pio run -e esp32-s2-saola-1'; o env ja passa -fstack-usage)."""
     path = os.path.join(OUT, "v8", "memoria_v8.json")
@@ -670,16 +671,16 @@ def pilha(check):
         print("[INFO] memoria_v8.json sem secao 'pilha': recompilar o firmware de voo "
               "e rodar python python/parse_memory_map.py.")
         return
-    ALVO = {"computeGainMatrixSDA_Fixed": 1376, "doubling_loop_q": 1424,
+    ALVO = {"computeGainMatrixSDA_Fixed": 1376, "doubling_loop_q": 1456,
             "invert_q": 1264}
     for e in p["etapas"]:
         alvo = ALVO.get(e["simbolo"])
         if alvo and e["bytes"]:
             check("prosa: quadro de pilha de %s (%d bytes)" % (e["simbolo"], alvo),
                   alvo, e["bytes"], tol=0.01)
-    check("prosa: pico de pilha de um solve (4064 bytes)", 4064,
+    check("prosa: pico de pilha de um solve (4096 bytes)", 4096,
           p["pico_aninhado_bytes"], tol=0.01)
-    check("prosa: pico de pilha de um solve (3.97 KB)", 3.97,
+    check("prosa: pico de pilha de um solve (4.00 KB)", 4.00,
           p["pico_aninhado_kb"], tol=0.01)
 
 
@@ -757,7 +758,7 @@ def norma_absolutos(check):
         return
     txt = open(path, encoding="utf-8", errors="replace").read()
     for pad, alvo, rot in (
-            (r"Norma otimizada \(soft-mul\):\s*([\d.]+) us", 69.9, "reciproco precomputado"),
+            (r"Norma otimizada \(soft-mul\):\s*([\d.]+) us", 70.2, "reciproco precomputado"),
             (r"Norma inteira \(int64_t\):\s*([\d.]+) us", 5.5, "teste inteiro")):
         m = re.search(pad, txt)
         if m:

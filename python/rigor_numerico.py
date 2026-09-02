@@ -59,6 +59,8 @@ APROXIMADAS = {
         "limite: o texto diz 'at most 6.8%'",
     "prosa: teto do formato Q13.18 (8192)":
         "definicao do formato, nao medida",
+    "prosa: nenhum ponto acima de 0.15%":
+        "limite: o texto diz 'no single point exceeding 0.15%' (pior: 0.1414%)",
     "prosa: SDA-fx nunca atinge 62% do periodo":
         "limite: o texto diz 'never reaches 62% of the control period'",
     "prosa: inclinacao maxima do envelope (80 graus)":
