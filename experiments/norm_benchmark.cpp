@@ -42,9 +42,15 @@ void setup() {
 
     Status st;
     q_t Hk[36], Hkn[36], Ak[36], Gk[36];
+    // Mesmos valores em float, para medir o custo do teste NO CAMINHO FLOAT.
+    // Ele nunca foi isolado: la' os dados ja' sao float, entao nao ha'
+    // conversao -- as 72 divisoes eram imposto so' do ponto fixo.
+    float Hk_f[36], Hkn_f[36];
     for (int i = 0; i < nn; i++) {
         Hk[i] = f2q(0.44f + 0.01f * (float)(i % 5), sh, &st);
         Hkn[i] = Hk[i] + f2q(0.001f * (float)(i % 3), sh, &st);
+        Hk_f[i] = q2f(Hk[i], sh);
+        Hkn_f[i] = q2f(Hkn[i], sh);
         Ak[i] = f2q(0.9f - 0.02f * (float)i, sh, &st);
         Gk[i] = f2q(0.1f + 0.01f * (float)(i % 4), sh, &st);
     }
@@ -121,6 +127,24 @@ void setup() {
     }
     uint32_t c_norm_int = get_ccount() - c_start;
     g_sink_u32 = sum_int;
+
+    // 5b. Norma do CAMINHO FLOAT, como em AutoLQR.cpp:496-508 -- sem
+    // conversao, porque la' os dados ja' sao float.
+    c_start = get_ccount();
+    float sum_relF_f = 0.0f;
+    for (int r = 0; r < N_REPS; r++) {
+        float diff = 0.0f, norm_Hk = 0.0f;
+        for (int i = 0; i < nn; i++) {
+            float d = Hkn_f[i] - Hk_f[i];
+            diff += d * d;
+            norm_Hk += Hk_f[i] * Hk_f[i];
+        }
+        diff = sqrtf(diff);
+        norm_Hk = sqrtf(norm_Hk);
+        sum_relF_f += (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
+    }
+    uint32_t c_norm_float_path = get_ccount() - c_start;
+    g_sink_float = sum_relF_f;
 
     // 6. 1 Iteracao pura de SDA-fx (8 matmuls 6x6 + 1 invert 6x6, sem norma)
     q_t Akn_buf[36], Gkn_buf[36], Hkn_buf[36];
@@ -238,6 +262,7 @@ void setup() {
     float t_sqrtf = to_us(c_sqrtf);
     float t_norm_mul = to_us(c_norm_mul);
     float t_norm_int = to_us(c_norm_int);
+    float t_norm_fpath = to_us(c_norm_float_path);
     float t_sda_pure = to_us(c_iter_sda_pure);
     float t_adda_pure = to_us(c_iter_adda_pure);
     float t_vi_pure = to_us(c_iter_vi_pure);
@@ -250,6 +275,7 @@ void setup() {
     Serial.printf("   - 1x sqrtf isolado (soft):     %7.2f us (%7.0f ciclos)\n", t_sqrtf, to_cyc(c_sqrtf));
     Serial.printf("2. Norma otimizada (soft-mul):    %7.2f us (%7.0f ciclos)\n", t_norm_mul, to_cyc(c_norm_mul));
     Serial.printf("3. Norma inteira (int64_t):       %7.2f us (%7.0f ciclos)\n", t_norm_int, to_cyc(c_norm_int));
+    Serial.printf("3b. Norma do caminho FLOAT:      %7.2f us (%7.0f ciclos)\n", t_norm_fpath, to_cyc(c_norm_float_path));
     Serial.println("--- ARITMETICA PURA POR ITERACAO (sem norma) ---");
     Serial.printf("4. SDA-fx iter pura:              %7.2f us (%7.0f ciclos)\n", t_sda_pure, to_cyc(c_iter_sda_pure));
     Serial.printf("5. ADDA-fx iter pura:             %7.2f us (%7.0f ciclos)\n", t_adda_pure, to_cyc(c_iter_adda_pure));

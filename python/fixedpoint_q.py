@@ -26,6 +26,8 @@ class Status:
         self.overflow = False
         self.iterations = 0
         self.max_abs_seen = 0
+        self.rel_step = 1.0        # espelha Status::rel_step do C++
+        self.bit_exact_zero = False
 
 
 def f2q(x, sh, st):
@@ -183,6 +185,9 @@ def doubling_loop_q(Ak, Gk, Hk, n, sh, variant, max_iterations, inv_rel_toleranc
     Gk = list(Gk)
     Hk = list(Hk)
 
+    # somas da ultima iteracao executada, para o passo relativo sair uma vez
+    ult_diff_sq, ult_h_sq, ult_saturou = 0, 0, False
+
     for it in range(max_iterations):
         if variant == VARIANT_ADAPTIVE_SCALING:
             sumG = sum(g * g for g in Gk)
@@ -247,17 +252,54 @@ def doubling_loop_q(Ak, Gk, Hk, n, sh, variant, max_iterations, inv_rel_toleranc
             ATHVA = matmul_q(AT, HVA, n, n, n, sh, st)
             Hkn = add_q(Hk, ATHVA)
 
-        # Frobenius relativa, igual ao C++ (FixedPointQ.cpp:doubling_loop_q) —
-        # era max-abs, trocado por pedido explicito do usuario (ver
-        # docs/auditoria_solvers_riccati.md, Secao 14).
-        diff_sq = sum((q2f(Hkn[i], sh) - q2f(Hk[i], sh)) ** 2 for i in range(nn))
-        h_sq = sum(q2f(h, sh) ** 2 for h in Hk)
+        # Frobenius relativa, igual ao C++ (FixedPointQ.cpp:doubling_loop_q).
+        # O CRITERIO nao mudou; a conta sim: ‖ΔH‖²·τ⁻² < ‖H‖² em inteiro, sem
+        # conversao, raiz nem divisao. O fator de escala 2^(2s) cancela na razao.
+        # ESTE ESPELHO TEM DE SEGUIR O C++ EXATAMENTE: malha_fechada_trajetorias.py
+        # e bench_trajetorias.py simulam no host o que a placa executa, e qualquer
+        # divergencia aqui vira divergencia entre simulacao e firmware.
+        #
+        # Python tem inteiro de precisao arbitraria, entao nao ha' o teto de
+        # 2^61 do int64 do C++ -- mas o `saturou` e' replicado assim mesmo, para
+        # que as duas implementacoes tomem a MESMA decisao na regiao de quebra
+        # que o mapa de seguranca varre.
+        LIM = 1 << 61
+        diff_sq = 0
+        h_sq = 0
+        bit_exact = True
+        saturou = False
+        for i in range(nn):
+            d = Hkn[i] - Hk[i]
+            if d != 0:
+                bit_exact = False
+            if saturou:
+                continue
+            d2 = d * d
+            h2 = Hk[i] * Hk[i]
+            if d2 > LIM - diff_sq or h2 > LIM - h_sq:
+                saturou = True
+                continue
+            diff_sq += d2
+            h_sq += h2
 
         Ak, Gk, Hk = Akn, Gkn, Hkn
-        rel = (diff_sq / h_sq) ** 0.5 if h_sq > 1e-20 else diff_sq ** 0.5
-        if rel < (1.0 / inv_rel_tolerance):
+        st.bit_exact_zero = bit_exact
+        ult_diff_sq, ult_h_sq, ult_saturou = diff_sq, h_sq, saturou
+
+        convergiu = False
+        if not saturou:
+            inv_tol2 = inv_rel_tolerance * inv_rel_tolerance
+            lhs = diff_sq * inv_tol2
+            # o C++ recusa por overflow do int64 o que aqui nunca estoura; a
+            # condicao equivalente e' o produto passar do que um int64 guarda.
+            convergiu = lhs <= 0x7FFFFFFFFFFFFFFF and lhs < h_sq
+        if convergiu:
             st.iterations = it + 1
             break
+
+    # passo relativo: instrumentacao, convertido uma vez na parada (igual ao C++)
+    st.rel_step = ((ult_diff_sq / ult_h_sq) ** 0.5
+                   if (not ult_saturou and ult_h_sq > 0) else 1.0)
 
     return Ak, Gk, Hk, cum_s, True
 

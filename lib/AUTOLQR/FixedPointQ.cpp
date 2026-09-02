@@ -87,6 +87,11 @@ FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Var
     q_t Akn[36], Gkn[36], Hkn[36];
     q_t AT[36], V[36], W[36], T1[36], T2[36], T3[36];
 
+    // Somas da ultima iteracao executada, para o passo relativo ser convertido
+    // a float UMA vez na parada e nao a cada iteracao (ver bloco de convergencia).
+    int64_t ultDiffSq = 0, ultHSq = 0;
+    bool ultSaturou = false;
+
     for (int it = 0; it < maxIterations; it++) {
         if (variant == Variant::AdaptiveScaling) {
             // s = sqrt(||H||/||G||), saturado em [0.1,10], aplicado a G e H.
@@ -162,31 +167,93 @@ FXQ_FAST_ATTR bool doubling_loop_q(q_t* Ak, q_t* Gk, q_t* Hk, int n, int sh, Var
 
         // Convergência: norma de Frobenius relativa ‖ΔHk‖_F/‖Hk‖_F < tol —
         // MESMA norma do caminho float (AutoLQR.cpp), por pedido explícito
-        // do usuário (antes era máx-abs, mais barata em inteiro; ver
-        // docs/auditoria_solvers_riccati.md, Seção 13/14). A soma de
-        // quadrados é feita em float, convertendo cada termo Q13.18 via
-        // q2f() antes de elevar ao quadrado: somar os quadrados em inteiro
-        // (até 36 termos de ~2^31 cada, perto do teto ±8192) estouraria
-        // int64 facilmente; em float o custo de 36 conversões + sqrtf é
-        // desprezível frente às 8 matmuls (1728 multiply-adds) da iteração
-        // — mesma lógica já usada no reescalonamento do ASDA acima.
-        float diffSq = 0.0f, hSq = 0.0f;
+        // do usuário (antes era máx-abs; ver docs/auditoria_solvers_riccati.md,
+        // Seção 13/14). O CRITÉRIO não muda: mesma norma, mesmo τ, mesmo
+        // orçamento, mesmas decisões. Muda a conta.
+        //
+        // A Seção 14 daquele documento justificava calcular em float dizendo
+        // que a soma inteira "evitaria estourar int64 sem ganho relevante de
+        // desempenho, já que o custo é desprezível frente às multiplicações de
+        // matriz". O microbenchmark posterior (outputs/serial_norm_benchmark.txt)
+        // mediu o contrário: 214,79 us, ou 43,7% da iteração do SDA-fx e 58,7%
+        // da iteração de valor, dos quais 129,80 us são só as 72 divisões em
+        // software do q2f() (432,7 ciclos cada). A norma inteira custa 5,47 us.
+        //
+        // Três passos de álgebra tiram a conta do float, sem tocar no critério:
+        //   1. elevar ao quadrado os dois lados     -> some a raiz;
+        //   2. multiplicar por ‖H‖²                 -> some a divisão;
+        //   3. o fator de escala 2^(2s) cancela na razão -> somem as conversões.
+        // Sobra  ‖ΔH‖²·τ⁻² < ‖H‖²  em inteiro puro, e EXATO: o caminho antigo
+        // arredondava em cada conversão e em cada acumulação (mantissa de 24
+        // bits). Onde os dois discordam, quem está certo é este.
+#ifdef SDRE_NORMA_FLOAT_LEGADA
+        float diffSqF = 0.0f, hSqF = 0.0f;
         bool bitExact = true;
         for (int i = 0; i < nn; i++) {
             if (Hkn[i] != Hk[i]) bitExact = false;
             float d = q2f(Hkn[i], sh) - q2f(Hk[i], sh);
             float h = q2f(Hk[i], sh);
-            diffSq += d * d;
-            hSq += h * h;
+            diffSqF += d * d;
+            hSqF += h * h;
         }
         memcpy(Ak, Akn, nn * sizeof(q_t));
         memcpy(Gk, Gkn, nn * sizeof(q_t));
         memcpy(Hk, Hkn, nn * sizeof(q_t));
-        float relF = (hSq > 1e-20f) ? sqrtf(diffSq / hSq) : sqrtf(diffSq);
+        float relF = (hSqF > 1e-20f) ? sqrtf(diffSqF / hSqF) : sqrtf(diffSqF);
         st->rel_step = relF;
         st->bit_exact_zero = bitExact;
         if (relF < (1.0f / (float)invRelTolerance)) { st->iterations = it + 1; break; }
+#else
+        // Teto de acumulação: 36 termos de até (2^31)² somam ~2^67 e estouram o
+        // int64. Não acontece na faixa de operação (‖P‖_F ~ 0,43, entradas ~2^17,
+        // soma ~2^39), mas o mapa de segurança varre a região de quebra DE
+        // PROPÓSITO, e lá acontece. Em vez de supor a faixa, o laço para de somar
+        // ao chegar em 2^61 e marca `saturou` — que significa "muito acima de τ",
+        // isto é, não convergiu. O `d != 0` continua rodando nos 36 termos para o
+        // bit_exact_zero não depender da saturação.
+        const int64_t LIM = (int64_t)1 << 61;
+        int64_t diffSq = 0, hSq = 0;
+        bool bitExact = true, saturou = false;
+        for (int i = 0; i < nn; i++) {
+            const q_t d = Hkn[i] - Hk[i];
+            if (d != 0) bitExact = false;
+            if (saturou) continue;
+            const int64_t d2 = (int64_t)d * (int64_t)d;
+            const int64_t h2 = (int64_t)Hk[i] * (int64_t)Hk[i];
+            if (d2 > LIM - diffSq || h2 > LIM - hSq) { saturou = true; continue; }
+            diffSq += d2;
+            hSq += h2;
+        }
+        memcpy(Ak, Akn, nn * sizeof(q_t));
+        memcpy(Gk, Gkn, nn * sizeof(q_t));
+        memcpy(Hk, Hkn, nn * sizeof(q_t));
+
+        ultDiffSq = diffSq;
+        ultHSq = hSq;
+        ultSaturou = saturou;
+        st->bit_exact_zero = bitExact;
+
+        bool convergiu = false;
+        if (!saturou) {
+            // τ⁻² = invRelTolerance². Se o produto estoura, o passo está ordens
+            // de grandeza acima de τ: nenhum hSq representável o alcançaria,
+            // logo não convergiu — e não se forma o produto.
+            const int64_t invTol2 = (int64_t)invRelTolerance * (int64_t)invRelTolerance;
+            int64_t lhs;
+            convergiu = !__builtin_mul_overflow(diffSq, invTol2, &lhs) && (lhs < hSq);
+        }
+        if (convergiu) { st->iterations = it + 1; break; }
+#endif
     }
+
+#ifndef SDRE_NORMA_FLOAT_LEGADA
+    // O passo relativo é instrumentação (Fig. 3(c) do artigo), lido só na parada.
+    // Convertido aqui UMA vez, em vez das 72 conversões por iteração que o
+    // caminho antigo pagava nove vezes por solve.
+    st->rel_step = (!ultSaturou && ultHSq > 0)
+                       ? sqrtf((float)ultDiffSq / (float)ultHSq)
+                       : 1.0f;
+#endif
 
     if (cum_s_out) *cum_s_out = cum_s;
     return true;
