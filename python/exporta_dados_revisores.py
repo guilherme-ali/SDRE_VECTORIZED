@@ -338,6 +338,7 @@ def escreve_readme(commit, codigo):
     A("| `derived/` | CSVs tabulares calculados de `raw/`, prontos para abrir em qualquer ferramenta. |")
     A("| `code.zip` | Snapshot do repositorio no commit acima: firmware de voo, os 8 firmwares de experimento, os 12 solvers e os scripts de analise. |")
     A("| `MANIFEST.md` | SHA-256 de cada arquivo, para conferir integridade. |")
+    A("| `PROVENANCE.md` | Por que oito capturas saem carimbadas `-dirty` e por que continuam rastreaveis. |")
     A("")
     A("## As capturas brutas (`raw/`)")
     A("")
@@ -443,6 +444,95 @@ def escreve_readme(commit, codigo):
     print("  README.md do deposito escrito")
 
 
+
+def escreve_procedencia(commit):
+    """PROVENANCE.md solto na raiz + o patch da arvore de trabalho em raw/.
+
+    `verifica_procedencia.py` reprova oito das nove capturas com ARVORE SUJA, e
+    isso e' verdade: a campanha rodou de madrugada com as tres alteracoes do
+    teste de parada ainda por commitar. O registro de por que o dado continua
+    rastreavel vivia so' em outputs/v9/, que e' gitignored -- nao entrava no
+    code.zip nem em parte alguma do pacote. Sem ele, quem rodar a auditoria a
+    partir do deposito ve' oito reprovacoes sem explicacao.
+    """
+    origem = os.path.join(OUT, "v9")
+    evid = os.path.join(RAW, "provenance")
+    os.makedirs(evid, exist_ok=True)
+    levados = []
+    for nome in ("arvore_de_trabalho_94af585.patch",
+                 "arvore_de_trabalho_94af585.status"):
+        src = os.path.join(origem, nome)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(evid, nome))
+            levados.append(nome)
+
+    L = []
+    A = L.append
+    A("# Procedencia das capturas / Provenance of the captures")
+    A("")
+    A("**In English:** the audit script reports eight of the nine captures as")
+    A("taken from a modified working tree (`94af585-dirty`). That is accurate.")
+    A("All nine came from the *same* build, the exact working-tree diff is")
+    A("included in `raw/provenance/`, and after the change was committed one")
+    A("experiment was recaptured from a clean tree: seven measured quantities")
+    A("came back identical to the hundredth of a microsecond. The defect is in")
+    A("the label, not in the data. Details below, in Portuguese.")
+    A("")
+    A("## O que aconteceu")
+    A("")
+    A("A campanha rodou das 00:16 as 10:48 de 02/09/2026 com as tres alteracoes")
+    A("do teste de parada ainda na arvore de trabalho. Todas as capturas sairam")
+    A("carimbadas `94af585-dirty`, e `python/verifica_procedencia.py` as reprova.")
+    A("")
+    A("## Por que o dado continua rastreavel")
+    A("")
+    A("**1. As nove vieram do mesmo build.** O proprio `verifica_procedencia`")
+    A("confirma que nao ha mistura de binarios: o defeito e' de rotulo.")
+    A("")
+    A("**2. O diff exato esta' aqui.** `raw/provenance/arvore_de_trabalho_94af585.patch`")
+    A("(3 arquivos, 270 linhas) e' o estado da arvore no momento da campanha;")
+    A("`.status` registra `HEAD = 94af585`. Aplicado sobre 94af585, reproduz o")
+    A("binario que gerou estas capturas.")
+    A("")
+    A("**3. Foi verificado empiricamente.** Depois do commit `abe5e08`, o")
+    A("experimento `norma` foi recapturado com a arvore limpa:")
+    A("")
+    A("| Grandeza | suja (`94af585-dirty`) | limpa (`abe5e08`) |")
+    A("|---|---|---|")
+    A("| Norma atual (soft-div) | 215,12 us | 215,12 us |")
+    A("| Norma otimizada (soft-mul) | 70,24 us | 70,24 us |")
+    A("| Norma inteira (int64) | 5,47 us | 5,47 us |")
+    A("| Norma do caminho float | 46,21 us | 46,21 us |")
+    A("| SDA-fx iteracao pura | 276,23 us | 276,23 us |")
+    A("| ADDA-fx iteracao pura | 421,45 us | 421,45 us |")
+    A("| VI-fx iteracao pura | 151,38 us | 151,38 us |")
+    A("")
+    A("Sete grandezas identicas ate o centesimo de microssegundo: o binario sujo")
+    A("era o binario que virou `abe5e08`.")
+    A("")
+    A("## Situacao de cada captura")
+    A("")
+    A("| Experimento | Carimbo | Situacao |")
+    A("|---|---|---|")
+    A("| `norma` | `abe5e08` (limpo) | recapturado apos o commit |")
+    A("| `voo` | `94af585-dirty` | **sujo esperado**: o runner liga `DEBUG_MODE` de proposito |")
+    A("| `bateria`, `benchmark_s3`, `tolerancia`, `gamma`, `sweep_qr`, `tol_qr`, "
+      "`fronteiras`, `repetibilidade` | `94af585-dirty` | sujo, com a equivalencia acima |")
+    A("")
+    A("## Ao rodar a auditoria a partir deste deposito")
+    A("")
+    A("`python python/auditoria.py` reprova a etapa `procedencia` por este motivo,")
+    A("e apenas por ele. As demais etapas --- 253 checagens numericas, as figuras")
+    A("e o ciclo de voo --- passam com zero divergencias.")
+    A("")
+    caminho = os.path.join(ZENODO, "PROVENANCE.md")
+    with open(caminho, "w", encoding="utf-8") as f:
+        f.write(chr(10).join(L))
+    print("  PROVENANCE.md escrito (%d evidencia(s) em raw/provenance/)"
+          % len(levados))
+    return caminho
+
+
 def empacota_para_upload():
     """Compacta raw/, derived/ e code/ em tres zips na raiz do deposito.
 
@@ -493,7 +583,7 @@ def escreve_manifesto(commit):
         f.write("\nArquivos deste deposito (confira com `sha256sum`):\n\n")
         for raiz, _, arquivos in os.walk(ZENODO):
             for name in sorted(arquivos):
-                if name in ("MANIFEST.md", "README.md"):
+                if name in ("MANIFEST.md", "README.md", "PROVENANCE.md"):
                     continue
                 p = os.path.join(raiz, name)
                 rel = os.path.relpath(p, ZENODO).replace(os.sep, "/")
@@ -592,6 +682,7 @@ def main():
     commit = git_commit()
     codigo = arquiva_codigo(commit)
     escreve_readme(commit, codigo)
+    escreve_procedencia(commit)
 
     # A compactacao vem ANTES do manifesto, de proposito. Ate 2026-09-01 era o
     # contrario, e o manifesto carimbava os zips da geracao anterior: o
@@ -607,7 +698,8 @@ def main():
 
     if not args.sem_zip:
         print(chr(10) + "Suba estes itens no deposito %s:" % DOI)
-        for n in ("README.md", "MANIFEST.md", "raw.zip", "derived.zip", "code.zip"):
+        for n in ("README.md", "PROVENANCE.md", "MANIFEST.md", "raw.zip",
+                  "derived.zip", "code.zip"):
             p = os.path.join(ZENODO, n)
             if os.path.isfile(p):
                 print("   %-14s %6.1f MB" % (n, os.path.getsize(p) / 1e6))
