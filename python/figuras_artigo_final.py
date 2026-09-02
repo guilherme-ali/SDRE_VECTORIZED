@@ -975,14 +975,24 @@ def fig6_flight(outdir, proc, stages, hist_tuple=None, meta=None):
         p_bins, cdf_y = hist_tuple
         ax1.step(p_bins, cdf_y, where="post", color=C_FLOAT, lw=1.6)
     else:
-        p = np.sort(np.array(proc) / 1000.0)
-        cdf = 100.0 * np.arange(1, len(p) + 1) / len(p)
-        ax1.step(p, cdf, where="post", color=C_FLOAT, lw=1.6)
+        p_bins = np.sort(np.array(proc) / 1000.0)
+        cdf_y = 100.0 * np.arange(1, len(p_bins) + 1) / len(p_bins)
+        ax1.step(p_bins, cdf_y, where="post", color=C_FLOAT, lw=1.6)
     ax1.axvline(6.0, color="0.25", ls=":", lw=1.2)
     ax1.set_xlabel("cycle processing time (ms)")
     ax1.set_ylabel("cycles below abscissa (%)")
     ax1.set_title("(a) complete control cycle", fontsize=8.5)
-    ax1.set_xlim(4.60, 6.15)
+    # Limites do dado, nao cravados: ate' 2026-09-02 era set_xlim(4.60, 6.15),
+    # calibrado para a mediana de 4.70 ms da campanha anterior. Com a mediana em
+    # 4.20 a subida inteira da CDF ficou a' esquerda do quadro, e o painel virou
+    # uma reta em 100%. Agora a borda esquerda acompanha o primeiro percentil
+    # nao nulo, e a direita cobre o periodo e a cauda observada.
+    _b = np.asarray(p_bins, dtype=float)
+    _c = np.asarray(cdf_y, dtype=float)
+    _nz = _b[_c > 0.05]
+    x0 = (float(_nz[0]) - 0.10) if len(_nz) else 4.10
+    x1 = max(6.15, float(_b[_c >= 99.999][0]) + 0.10) if (_c >= 99.999).any() else 6.15
+    ax1.set_xlim(x0, x1)
     ax1.set_ylim(0, 119)
     ax1.set_yticks([0, 25, 50, 75, 100])
     ax1.text(6.05, 45, "6.0 ms\n(167 Hz)\ncontrol period", fontsize=7, color="0.25",

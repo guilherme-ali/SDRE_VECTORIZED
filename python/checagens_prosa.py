@@ -16,6 +16,7 @@ que tiver saido do lugar aparece como XX.
 Importado por verifica_numeros_artigo.py; nao roda sozinho.
 """
 import csv
+import io
 import json
 import math
 import os
@@ -333,6 +334,44 @@ def gamma(check):
     check("prosa: residuo em gamma=0.7 (9.14e-3)", 9.14e-3, g[0.7][1])
     check("prosa: residuo em gamma=0.1 (1.34e-2)", 1.34e-2, g[0.1][1])
     check("prosa: breakdown em gamma=0.9 (194 de 1824)", 194, g[0.9][2], tol=0.01)
+
+
+def dispersao_e_teste_float(check):
+    """Sec. Results/Matched criterion: dispersao de 1.42 entre variantes na mesma
+    aritmetica, e 46.2 us do teste no caminho float.
+
+    Os tres numeros que a cobertura apontou como descobertos em 2026-09-02 --
+    junto com o 0.95 e o 0.53, que estavam ERRADOS no texto e nenhuma das 250
+    checagens pegava. A auditoria confere o que tem checagem; a cobertura mede
+    o que nao tem, e foi ela que achou.
+    """
+    import glob as _g
+    bat = os.path.join(OUT, "serial_capture_bateria_v5_6traj.txt")
+    t = defaultdict(list)
+    for p in _linhas(bat, "RUN,"):
+        if len(p) < 8 or p[1] == "traj":
+            continue
+        try:
+            t[p[3]].append(float(p[4]))
+        except (ValueError, IndexError):
+            pass
+    DBL = ["SDA", "SDA_SS", "ADDA", "SDA_SCALED", "ASDA"]
+    fx = [st.median(t[m + "_FIXED"]) for m in DBL if t.get(m + "_FIXED")]
+    if len(fx) == 5:
+        check("prosa: dispersao entre variantes na mesma aritmetica (1.42)",
+              1.42, max(fx) / min(fx))
+
+    # 46.2 us: custo do teste no caminho float, medido no microbenchmark
+    nb = os.path.join(OUT, "serial_norm_benchmark.txt")
+    if os.path.isfile(nb):
+        txt = io.open(nb, encoding="utf-8", errors="replace").read()
+        m = re.search(r"Norma do caminho FLOAT:\s*([\d.]+) us", txt)
+        if m:
+            check("prosa: teste no caminho float (46.2 us)", 46.2, float(m.group(1)))
+            atual = re.search(r"Norma atual \(soft-div q2f\):\s*([\d.]+) us", txt)
+            if atual:
+                check("prosa: o ponto fixo pagava 4.7x o float pelo mesmo teste",
+                      4.7, float(atual.group(1)) / float(m.group(1)))
 
 
 def malha_fechada(check):
@@ -785,6 +824,7 @@ def todas(check, bat_path, ts_loader, t2=None, t3=None, r2=None):
     teste_de_convergencia(check)
     mapa_de_seguranca(check)
     gamma(check)
+    dispersao_e_teste_float(check)
     malha_fechada(check)
     memoria(check)
     tolerancia(check, ts_loader)

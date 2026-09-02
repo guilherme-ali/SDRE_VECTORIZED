@@ -41,7 +41,7 @@ ZENODO = os.path.join(REPO, "zenodo_diname2027")
 # DOI reservado no Zenodo para este deposito. E' a mesma string que aparece na
 # secao "Data and Code Availability" do artigo; python/auditoria.py confere que
 # o .tex nao voltou a carregar um marcador no lugar dela.
-DOI = "10.5281/zenodo.22238478"
+DOI = "10.5281/zenodo.22256810"
 # DOI conceito: resolve sempre para a versao mais recente do deposito. A v1
 # (zenodo.22236199) foi criada pela integracao automatica GitHub->Zenodo e
 # trazia so' o zip do repositorio, sem as capturas brutas -- ver README do
@@ -509,7 +509,7 @@ def main():
                     help="deixa raw/, derived/ e code/ como pastas, sem compactar "
                          "(util para inspecionar antes de subir)")
     ap.add_argument("--doi", default=None,
-                    help="DOI desta versao (ex.: 10.5281/zenodo.22238478). Cada "
+                    help="DOI desta versao (ex.: 10.5281/zenodo.22256810). Cada "
                          "versao nova no Zenodo ganha o seu; reserve-o no rascunho "
                          "(New version -> o DOI ja' aparece) e passe aqui, em vez "
                          "de editar a constante a mao.")

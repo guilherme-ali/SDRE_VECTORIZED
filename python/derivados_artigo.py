@@ -81,7 +81,7 @@ def referencia(args):
     print("referencia float64 (scipy) sobre %d pontos (%d falhas)" % (len(r), falhas))
     print("  residuo relativo : min %.2e | mediana %.2e | max %.2e"
           % (r.min(), float(np.median(r)), r.max()))
-    print("  artigo afirma    : entre 4.8e-15 e 3.0e-13, mediana 6.3e-14")
+    print("  artigo afirma    : entre 4.8e-15 e 2.9e-13, mediana 6.3e-14")
 
     destino = os.path.join(OUT, "v8", "residuo_referencia.csv")
     os.makedirs(os.path.dirname(destino), exist_ok=True)

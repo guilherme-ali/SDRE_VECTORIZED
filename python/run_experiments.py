@@ -284,6 +284,27 @@ def find_pio_exe() -> str:
 
 
 def preflight(ctx: RunContext, need_hardware: bool) -> str:
+    # Arvore suja: as capturas saem carimbadas <commit>-dirty, e o carimbo deixa
+    # de descrever o binario. Aconteceu com oito das nove capturas da campanha de
+    # 2026-09-02, e so' foi recuperavel porque o diff foi salvo a mao e o
+    # microbenchmark recapturado depois do commit deu numeros identicos. O passo
+    # de voo tem excecao propria (liga DEBUG_MODE de proposito, ver
+    # flight_debug_mode), entao a checagem so' vale para a campanha inteira.
+    if need_hardware and not getattr(ctx.args, "permitir_arvore_suja", False):
+        try:
+            sujo = subprocess.call(["git", "diff", "--quiet"], cwd=REPO,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL) != 0
+        except Exception:
+            sujo = False
+        if sujo:
+            raise SystemExit(
+                "arvore de trabalho suja: as capturas sairiam com carimbo "
+                "'<commit>-dirty', que nao descreve binario nenhum.\n"
+                "  Commite antes, ou passe --permitir-arvore-suja se for "
+                "deliberado (e salve 'git diff' junto das capturas)."
+            )
+
     ctx.log("Pre-checagem: dependencias Python...")
     missing = []
     for mod in ("serial", "numpy", "scipy", "matplotlib"):
@@ -750,6 +771,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "(unico nao deterministico da campanha). Todas rodam com o "
                          "mesmo binario, gravadas em outputs/voo/voo_runN.txt")
     ap.add_argument("--force", action="store_true", help="recaptura mesmo se o arquivo ja existir")
+    ap.add_argument("--permitir-arvore-suja", action="store_true",
+                    help="deixa a campanha rodar com alteracoes nao commitadas. Sem isto,\n"
+                         "--all recusa: as capturas sairiam carimbadas <commit>-dirty, e o\n"
+                         "carimbo deixa de descrever o binario (ver verifica_procedencia).")
     ap.add_argument("--port", default=None, help="porta serial (padrao: autodetecao)")
     ap.add_argument("--analyze-only", action="store_true",
                      help="pula toda a medicao; roda so analise + figuras + PDF sobre capturas existentes")
