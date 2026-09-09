@@ -687,6 +687,26 @@ def fig4_tolerance_v8(outdir, ts, cover):
     # fazia a fonte cair para ~6 pt na pagina impressa.)
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(6.7, 2.45))
 
+    # Faixas sombreadas com os limites min/max das 5 variantes doubling em cada aritmetica
+    m_fix = ["SDA_FIXED", "SDA_SS_FIXED", "ASDA_FIXED", "SDA_SCALED_FIXED", "ADDA_FIXED"]
+    m_flt = ["SDA", "SDA_SS", "ASDA", "SDA_SCALED", "ADDA"]
+
+    res_fix_lo = [min([_tolsweep_series_stats(ts, "0a", m, taus)[t]["resid_median"] for m in m_fix]) for t in taus]
+    res_fix_hi = [max([_tolsweep_series_stats(ts, "0a", m, taus)[t]["resid_median"] for m in m_fix]) for t in taus]
+    tim_fix_lo = [min([_tolsweep_series_stats(ts, "0a", m, taus)[t]["time_ms_mean"] for m in m_fix]) for t in taus]
+    tim_fix_hi = [max([_tolsweep_series_stats(ts, "0a", m, taus)[t]["time_ms_mean"] for m in m_fix]) for t in taus]
+
+    res_flt_lo = [min([_tolsweep_series_stats(ts, "0a", m, taus)[t]["resid_median"] for m in m_flt]) for t in taus]
+    res_flt_hi = [max([_tolsweep_series_stats(ts, "0a", m, taus)[t]["resid_median"] for m in m_flt]) for t in taus]
+    tim_flt_lo = [min([_tolsweep_series_stats(ts, "0a", m, taus)[t]["time_ms_mean"] for m in m_flt]) for t in taus]
+    tim_flt_hi = [max([_tolsweep_series_stats(ts, "0a", m, taus)[t]["time_ms_mean"] for m in m_flt]) for t in taus]
+
+    ax1.fill_between(taus, res_fix_lo, res_fix_hi, color=C_FIXED, alpha=0.22, zorder=0, lw=0)
+    ax1.fill_between(taus, res_flt_lo, res_flt_hi, color=C_FLOAT, alpha=0.18, zorder=0, lw=0)
+
+    ax2.fill_between(taus, tim_fix_lo, tim_fix_hi, color=C_FIXED, alpha=0.22, zorder=0, lw=0)
+    ax2.fill_between(taus, tim_flt_lo, tim_flt_hi, color=C_FLOAT, alpha=0.18, zorder=0, lw=0)
+
     y_floor = 3e-7  # piso do eixo (c) p/ plotar step==0 (bit-exato), não representável em log
     zero_fracs = []  # (tau, metodo, n_bit_exact, n_total) — p/ nota de rodapé, evita poluir o grafico
     for series_idx, (metodo, exp, lab, col, ls, mk) in enumerate(_V8_SERIES):
@@ -775,13 +795,18 @@ def fig4_tolerance_v8(outdir, ts, cover):
         ax.set_xticklabels([], minor=True)
 
     from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     h1, l1 = ax1.get_legend_handles_labels()
-    h1 = h1 + [Line2D([], [], ls="none", marker="x", color="0.25", ms=6, mew=1.5)]
-    l1 = l1 + [r"bit-exact ($\Delta H=0$), panel (c)"]
-    fig.legend(h1, l1, loc="lower center", ncol=3, frameon=False, fontsize=7.2,
-               bbox_to_anchor=(0.5, -0.09), columnspacing=1.1, handlelength=2.0,
-               handletextpad=0.4)
-    fig.tight_layout(rect=(0, 0.11, 1, 1))
+    h1.append(Patch(facecolor=C_FIXED, alpha=0.25, edgecolor="none"))
+    l1.append("SDA variants (Q13.18)")
+    h1.append(Patch(facecolor=C_FLOAT, alpha=0.25, edgecolor="none"))
+    l1.append("SDA variants (float)")
+    h1.append(Line2D([], [], ls="none", marker="x", color="0.25", ms=5, mew=1.2))
+    l1.append(r"bit-exact ($\Delta H=0$)")
+    fig.legend(h1, l1, loc="lower center", ncol=4, frameon=False, fontsize=6.8,
+               bbox_to_anchor=(0.5, -0.09), columnspacing=0.9, handlelength=1.8,
+               handletextpad=0.35)
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
     p = os.path.join(outdir, "fig4_tolerance_v8.pdf")
     fig.savefig(p, metadata=_metadados("fig4_tolerance_v8.pdf", [TOLSWEEP, COBER]))
     plt.close(fig)
