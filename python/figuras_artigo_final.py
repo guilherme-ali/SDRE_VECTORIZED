@@ -354,20 +354,36 @@ def fig1_envelope(outdir, cover):
     dados = trj.gerar_todas()
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.0, 2.28))
+    colors = [C_FLOAT, "#6F4C9B", C_VI, "#CC79A7", "#000000", C_FIXED]
+    markers = ["o", "s", "^", "D", "v", "P"]
+    panel_order = [i for i in range(len(TRAJS)) if i != 1] + [1]
+    trajectories = {}
     for i, name in enumerate(TRAJS):
         d = dados[name]
         tilt = np.rad2deg(np.hypot(np.asarray(d["phi"]), np.asarray(d["theta"])))
         rate = np.rad2deg(np.sqrt(np.asarray(d["p"]) ** 2 + np.asarray(d["q"]) ** 2
                                   + np.asarray(d["r"]) ** 2))
+        trajectories[name] = (tilt, rate)
+    # Fine marks keep both dense panels legible. Draw T2 last so its compact
+    # loci are not hidden by later trajectories.
+    for i in panel_order:
+        tilt, rate = trajectories[TRAJS[i]]
+        is_t2 = i == 1
         sl = slice(None, None, 11)
-        ax1.scatter(tilt[sl], np.maximum(rate[sl], 1.0), s=1.2, alpha=0.30,
-                    color=PALETTE[i], edgecolors="none", rasterized=True)
-        c = cover[name]
-        ax2.scatter(c["normP_F"][::11], c["cond_IGP"][::11], s=1.2, alpha=0.30,
-                    color=PALETTE[i], edgecolors="none", rasterized=True)
+        ax1.scatter(tilt[sl], np.maximum(rate[sl], 1.0),
+                    s=2.0 if is_t2 else 1.2, alpha=0.75 if is_t2 else 0.35,
+                    color=colors[i], marker=markers[i], edgecolors="none",
+                    zorder=3 if is_t2 else 2, rasterized=True)
+    for i in panel_order:
+        c = cover[TRAJS[i]]
+        is_t2 = i == 1
+        ax2.scatter(c["normP_F"][::11], c["cond_IGP"][::11],
+                    s=2.0 if is_t2 else 1.2, alpha=0.75 if is_t2 else 0.35,
+                    color=colors[i], marker=markers[i], edgecolors="none",
+                    zorder=3 if is_t2 else 2, rasterized=True)
     ax1.set_yscale("log")
     ax1.set_xlabel("tilt magnitude (deg)")
-    ax1.set_ylabel(r"body-rate magnitude (deg/s)")
+    ax1.set_ylabel("body-rate magnitude\n(deg/s) (log scale)")
     ax1.set_title("(a) operating envelope covered", fontsize=8.5)
     ax1.set_xlim(-3, 95)
     ax1.set_ylim(0.8, 6000)
@@ -377,7 +393,7 @@ def fig1_envelope(outdir, cover):
     ax2.set_xlim(0.34, 0.52)
     ax2.set_ylim(5.3, 7.3)
     from matplotlib.lines import Line2D
-    handles = [Line2D([], [], marker="o", ls="", ms=4, color=PALETTE[i],
+    handles = [Line2D([], [], marker=markers[i], ls="", ms=4, color=colors[i],
                       label=TRAJ_LBL[t]) for i, t in enumerate(TRAJS)]
     fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False,
                fontsize=7.5, bbox_to_anchor=(0.5, -0.045), columnspacing=1.1,
@@ -453,28 +469,41 @@ def fig3_predictability(outdir, tt, it):
     d_sda = [np.array(tt[("SDA_FIXED", t)]) / 1000.0 for t in TRAJS]
     d_vi = [np.array(tt[("ITERATIVE_FIXED", t)]) / 1000.0 for t in TRAJS]
     bp1 = ax1.boxplot(d_sda, positions=pos - w / 2, widths=w, patch_artist=True,
-                      showfliers=False, medianprops=dict(color="black", lw=1.0),
-                      whis=(1, 99))
+                      showfliers=False, medianprops=dict(color=C_FIXED, lw=1.2),
+                      boxprops=dict(edgecolor=C_FIXED, lw=0.9),
+                      whiskerprops=dict(color=C_FIXED, lw=0.9),
+                      capprops=dict(color=C_FIXED, lw=0.9), whis=(1, 99))
     bp2 = ax1.boxplot(d_vi, positions=pos + w / 2, widths=w, patch_artist=True,
-                      showfliers=False, medianprops=dict(color="black", lw=1.0),
-                      whis=(1, 99))
+                      showfliers=False, medianprops=dict(color=C_VI, lw=1.2),
+                      boxprops=dict(edgecolor=C_VI, lw=0.9),
+                      whiskerprops=dict(color=C_VI, lw=0.9),
+                      capprops=dict(color=C_VI, lw=0.9), whis=(1, 99))
     for b in bp1["boxes"]:
         b.set_facecolor(C_FIXED)
         b.set_linewidth(0.6)
     for b in bp2["boxes"]:
         b.set_facecolor(C_VI)
         b.set_linewidth(0.6)
+    # Near-constant timings collapse a box to one horizontal stroke. Explicit
+    # median markers keep the method and its colour visible in that case.
+    ax1.scatter(pos - w / 2, [st.median(v) for v in d_sda], marker="s", s=22,
+                facecolor=C_FIXED, edgecolor="black", linewidth=0.45, zorder=4)
+    ax1.scatter(pos + w / 2, [st.median(v) for v in d_vi], marker="o", s=22,
+                facecolor=C_VI, edgecolor="black", linewidth=0.45, zorder=4)
     ax1.axhline(PERIOD_US / 1000.0, color="0.2", ls="--", lw=1.0)
     ax1.set_yscale("log")
     ax1.set_ylim(0.6, 60)
     ax1.set_xticks(pos)
     ax1.set_xticklabels([TRAJ_LBL[t].split()[0] for t in TRAJS], fontsize=7.5)
-    ax1.set_ylabel("solve time (ms), log scale")
+    ax1.set_ylabel("solve time (ms) (log scale)")
     ax1.set_title("(a) cost per trajectory", fontsize=8.5)
-    from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
-    ax1.legend(handles=[Patch(facecolor=C_FIXED, label="SDA-fx"),
-                        Patch(facecolor=C_VI, label="Value iter.-fx"),
+    ax1.legend(handles=[Line2D([], [], marker="s", ls="", ms=5.2,
+                               markerfacecolor=C_FIXED, markeredgecolor="black",
+                               markeredgewidth=0.45, label="SDA-fx"),
+                        Line2D([], [], marker="o", ls="", ms=5.2,
+                               markerfacecolor=C_VI, markeredgecolor="black",
+                               markeredgewidth=0.45, label="Value iter.-fx"),
                         Line2D([], [], color="0.2", ls="--", lw=1.0,
                                label="6.0 ms control period")],
                loc="upper left", frameon=True, framealpha=0.95,
@@ -497,7 +526,7 @@ def fig3_predictability(outdir, tt, it):
                      ha="center", fontsize=6.8, color="0.25")
     ax2.set_xscale("log")
     ax2.set_ylim(0, 42)
-    ax2.set_xlabel(r"mean $\|\Delta x\|$ between consecutive points")
+    ax2.set_xlabel(r"mean $\|\Delta x\|$ between" "\nconsecutive points (log scale)")
     ax2.set_xlim(1.3e-3, 45)
     ax2.set_ylabel("median iterations")
     ax2.set_title("(b) iterations vs. operating-point motion", fontsize=8.5)
@@ -700,8 +729,8 @@ def fig4_tolerance_v8(outdir, ts, cover):
     ax1.set_xscale("log")
     ax1.set_yscale("log")
     ax1.invert_xaxis()
-    ax1.set_xlabel(r"requested tolerance $\tau$")
-    ax1.set_ylabel("achieved DARE residual")
+    ax1.set_xlabel(r"requested tolerance $\tau$" "\n(log scale)")
+    ax1.set_ylabel("achieved DARE residual\n(log scale)")
     ax1.set_title("(a) achieved residual", fontsize=8.5)
 
     ax2.set_xscale("log")
@@ -715,8 +744,8 @@ def fig4_tolerance_v8(outdir, ts, cover):
     # das de value iteration (>100 ms) — o unico canto do painel sem dado.
     ax2.text(taus[-1], 1.35, "6.0 ms period", fontsize=6.3,
              color="0.35", ha="right", va="center")
-    ax2.set_xlabel(r"requested tolerance $\tau$")
-    ax2.set_ylabel("mean solve time (ms)")
+    ax2.set_xlabel(r"requested tolerance $\tau$" "\n(log scale)")
+    ax2.set_ylabel("mean solve time (ms)\n(log scale)")
     ax2.set_title("(b) mean solve time", fontsize=8.5)
 
     ax3.set_xscale("log")
@@ -729,8 +758,8 @@ def fig4_tolerance_v8(outdir, ts, cover):
              ha="left", va="bottom", rotation=32)
     ax3.text(math.sqrt(floor_lo * floor_hi), floor_hi * 2.6, "quantisation\nfloor",
              fontsize=6.5, color="0.25", ha="center", va="bottom")
-    ax3.set_xlabel(r"requested tolerance $\tau$")
-    ax3.set_ylabel(r"measured step $\|\Delta \mathbf{H}\|_F/\|\mathbf{H}\|_F$")
+    ax3.set_xlabel(r"requested tolerance $\tau$" "\n(log scale)")
+    ax3.set_ylabel("measured step\n" r"$\|\Delta \mathbf{H}\|_F/\|\mathbf{H}\|_F$ (log scale)")
     ax3.set_title("(c) step at termination", fontsize=8.5)
 
     # ticks explicitos: com 3 paineis estreitos o locator automatico do log
@@ -785,7 +814,7 @@ def fig5_safety(outdir, agg):
                  lw=1.2, ms=4.0, alpha=0.9)
     ax1.axvline(127.9, color="0.2", ls="--", lw=1.1)
     ax1.set_xscale("log")
-    ax1.set_xlabel(r"$R_\mathrm{scale}$ (nominal $=1$)")
+    ax1.set_xlabel(r"$R_\mathrm{scale}$ (nominal $=1$) (log scale)")
     ax1.set_ylabel("breakdown rate (%)")
     ax1.set_ylim(-5, 112)
     ax1.set_yticks([0, 25, 50, 75, 100])
@@ -796,7 +825,7 @@ def fig5_safety(outdir, agg):
     ax1.text(1.1e-3, 68, r"$\mathbf{G}_0$ setup overflow", fontsize=6.8,
              color="0.15", ha="left")
     ax2.set_xscale("log")
-    ax2.set_xlabel(r"$R_\mathrm{scale}$ (usable band)")
+    ax2.set_xlabel(r"$R_\mathrm{scale}$ (usable band) (log scale)")
     ax2.set_ylabel("breakdown rate (%)")
     ax2.set_ylim(-1.2, 26)
     ax2.set_title("(b) zoom: usable band", fontsize=8.5)
@@ -855,12 +884,7 @@ _DIVERGING = LinearSegmentedColormap.from_list(
     "okabe_div", ["#0072B2", "#8FBFDD", "#F0EFEC", "#EBA77C", "#D55E00"])
 
 
-# Janela escolhida a partir do dado, nao a olho: em 12-14.5 s o chirp esta a
-# ~1.9 Hz (cerca de 5 ciclos, ainda legiveis), o atraso de rastreamento e' 5.2 deg
-# sobre uma amplitude de 27.7 deg — visivel, mostrando o controlador sob carga —
-# enquanto a distancia float64<->Q13.18 e' 0.12 deg, 2% disso. Janelas mais tarde
-# (>=28 s) empilham 8+ ciclos e o atraso passa de 13 deg, o que desvia a atencao
-# do ponto do painel; janelas antes de 8 s sao faceis demais.
+# Mesma janela T3 de 12-14.5 s, usando somente as series ja armazenadas.
 def fig5_closed_loop(outdir, window=(12.0, 14.5)):
     if not (os.path.isfile(MALHA) and os.path.isfile(SERIE_CSV)):
         print("  [pulado] fig5_closed_loop: faltam %s e/ou %s "
@@ -885,25 +909,20 @@ def fig5_closed_loop(outdir, window=(12.0, 14.5)):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.0, 2.32),
                                    gridspec_kw=dict(width_ratios=[1.0, 1.30]))
 
-    # ---- (a) rastreamento numa janela do chirp -------------------------------
-    # Janela curta, nao os 60 s: a 60 s o chirp vira um borrao solido e nada se
-    # le. A janela default fica na metade alta da varredura, onde rastrear e'
-    # mais dificil — se as duas aritmeticas coincidem ali, coincidem no resto.
+    # ---- (a) diferenca de roll entre aritmeticas na mesma janela do chirp ----
+    # Referencia: SDA double precision, nao comando nem solver Schur.
     t = np.array(ser["t"])
     m = (t >= window[0]) & (t <= window[1])
-    ax1.plot(t[m], np.array(ser["phi_ref_deg"])[m], color="0.30", lw=2.4,
-             solid_capstyle="round", label="commanded", zorder=1)
-    if "phi_SDA_float64_deg" in ser:
-        ax1.plot(t[m], np.array(ser["phi_SDA_float64_deg"])[m], color=C_FLOAT,
-                 lw=1.3, label="float64", zorder=2)
-    if "phi_SDA_FIXED_deg" in ser:
-        ax1.plot(t[m], np.array(ser["phi_SDA_FIXED_deg"])[m], color=C_FIXED,
-                 lw=1.3, ls=(0, (3, 2)), label="Q13.18 (SDA-fx)", zorder=3)
+    delta_phi = (np.array(ser["phi_SDA_FIXED_deg"])[m]
+                 - np.array(ser["phi_SDA_float64_deg"])[m])
+    ax1.axhline(0.0, color="0.30", lw=0.9, ls="--", zorder=1)
+    ax1.plot(t[m], delta_phi, color=C_FIXED, lw=1.3,
+             label="SDA_FIXED $-$ SDA double precision", zorder=2)
     ax1.set_xlabel("time (s)")
-    ax1.set_ylabel("roll (deg)")
-    ax1.set_title("(a) tracking on T3 (chirp), %g-%g s" % window, fontsize=8.5)
+    ax1.set_ylabel(r"roll difference $\Delta\phi$ (deg)")
+    ax1.set_title("(a) T3 (chirp), %g-%g s" % window, fontsize=8.5)
     ax1.set_xlim(*window)
-    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.13), ncol=3,
+    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.13), ncol=1,
                frameon=False, fontsize=6.8, handlelength=1.9,
                columnspacing=1.0, handletextpad=0.4)
 
@@ -960,6 +979,9 @@ def fig5_closed_loop(outdir, window=(12.0, 14.5)):
     fig.savefig(p, metadata=_metadados("fig5_closed_loop_v8.pdf", [MALHA, SERIE_CSV]))
     plt.close(fig)
     print("  ok", p)
+    print("     delta_phi (SDA_FIXED - SDA double precision), %g-%g s: "
+          "min=%.9g deg, max=%.9g deg, maxabs=%.9g deg"
+          % (*window, np.min(delta_phi), np.max(delta_phi), np.max(np.abs(delta_phi))))
     print("     |dJ/J| maximo T1-T5: doubling %.3f%%, incluindo value iter. %.3f%%"
           % (worst_dbl, worst_all))
     return worst_dbl, worst_all
@@ -995,8 +1017,15 @@ def fig6_flight(outdir, proc, stages, hist_tuple=None, meta=None):
     ax1.set_xlim(x0, x1)
     ax1.set_ylim(0, 119)
     ax1.set_yticks([0, 25, 50, 75, 100])
-    ax1.text(6.05, 45, "6.0 ms\n(167 Hz)\ncontrol period", fontsize=7, color="0.25",
-             ha="left", va="center")
+    # Rotulo do periodo: ate' 2026-09-02 ficava em (6.05, 45) com ha="left",
+    # isto e', colado na linha tracejada de 6.0 ms e correndo para a borda
+    # direita do quadro. Agora fica a' esquerda da linha, encostado nela sem
+    # toca-la: a borda direita do texto para a 3.5% da largura do painel. A
+    # posicao da linha e' recalculada a partir dos limites, que sao dirigidos
+    # pelo dado -- cravar milissegundos aqui desalinharia na proxima campanha.
+    _xlin = (6.0 - x0) / (x1 - x0)
+    ax1.text(_xlin - 0.035, 0.42, "6.0 ms\n(167 Hz)\ncontrol period", fontsize=7,
+             color="0.25", ha="right", va="center", transform=ax1.transAxes)
 
     order = ["DARE solve", "IMU read", "WiFi/UDP", "Euler", "Madgwick",
              "Mixer", "Motor write", "LEDs", "Battery", "SDC matrix",
