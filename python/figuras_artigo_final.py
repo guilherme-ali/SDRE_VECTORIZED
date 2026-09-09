@@ -617,7 +617,6 @@ def fig4_tolerance(outdir, tq, cover):
 # --------------------------------------------------------------------------
 _V8_SERIES = [
     ("SDA_FIXED", "0a", "SDA-fx", C_FIXED, "-", "o"),
-    ("ASDA_FIXED", "0a", "ASDA-fx", "#CC79A7", "-", "s"),
     ("ITERATIVE_FIXED", "0b", "Value iter.-fx", C_VI, "-", "^"),
     ("SDA", "0a", "SDA (float)", C_FLOAT, "--", "o"),
     ("ITERATIVE", "0b", "Value iter. (float)", "#56B4E9", "--", "^"),
@@ -695,12 +694,12 @@ def fig4_tolerance_v8(outdir, ts, cover):
         xs_a = [t for t in taus if t in s and s[t]["resid_median"] is not None]
         ys_a = [s[t]["resid_median"] for t in xs_a]
         if ys_a:
-            ax1.plot(xs_a, ys_a, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+            ax1.plot(xs_a, ys_a, ls=ls, marker=mk, color=col, lw=0.7, ms=3.2, label=lab)
 
         xs_b = [t for t in taus if t in s and s[t]["time_ms_mean"] is not None]
         ys_b = [s[t]["time_ms_mean"] for t in xs_b]
         if ys_b:
-            ax2.plot(xs_b, ys_b, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+            ax2.plot(xs_b, ys_b, ls=ls, marker=mk, color=col, lw=0.7, ms=3.2, label=lab)
 
         # painel (c): pontos com passo>0 em escala log normal; passo==0 (bit-exato)
         # não é representável em log — vai para o piso do eixo com marcador 'x'.
@@ -716,13 +715,13 @@ def fig4_tolerance_v8(outdir, ts, cover):
             else:
                 xs_zero.append(t)
         if xs_pos:
-            ax3.plot(xs_pos, ys_pos, ls=ls, marker=mk, color=col, lw=1.2, ms=4, label=lab)
+            ax3.plot(xs_pos, ys_pos, ls=ls, marker=mk, color=col, lw=0.7, ms=3.2, label=lab)
         if xs_zero:
             # leve jitter vertical por série (log scale) — evita marcadores 'x' de séries
             # diferentes empilhados exatamente no mesmo pixel no mesmo tau.
             y_jit = y_floor * (1.0 + 0.22 * series_idx)
             ax3.plot(xs_zero, [y_jit] * len(xs_zero), ls="none", marker="x", color=col,
-                     ms=6, mew=1.5, zorder=5)
+                     ms=5, mew=1.2, zorder=5)
             for t in xs_zero:
                 zero_fracs.append((t, lab, s[t]["n_bit_exact"], s[t]["n_total"]))
 
@@ -750,8 +749,14 @@ def fig4_tolerance_v8(outdir, ts, cover):
 
     ax3.set_xscale("log")
     ax3.set_yscale("log")
+    from matplotlib.ticker import LogLocator, NullFormatter
+    ax3.minorticks_on()
+    ax3.yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10), numticks=100))
+    ax3.yaxis.set_minor_formatter(NullFormatter())
+    ax3.tick_params(axis="y", which="minor", length=2.8, width=0.65,
+                    color="0.15", left=True, right=False)
     ax3.invert_xaxis()
-    ax3.set_ylim(y_floor * 0.6, 1.5)
+    ax3.set_ylim(y_floor * 0.6, 1.0e-2)
     ax3.axhspan(floor_lo, floor_hi, color="0.75", alpha=0.55, lw=0, zorder=0)
     ax3.plot(taus, taus, color="0.5", ls=":", lw=1.0, zorder=1)
     ax3.text(taus[1], taus[1] * 1.6, r"$y=\tau$", fontsize=6.5, color="0.4",
